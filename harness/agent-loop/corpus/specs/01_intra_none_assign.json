@@ -1,0 +1,19 @@
+{
+  "id": "01",
+  "name": "intra_none_assign",
+  "description": "Straight-line None assignment followed by attribute consumer. The simplest possible regression: no branching, no interprocedural flow.",
+  "analysis_note": "result = None sets env[result]=Nullable. return result.upper() emits Consumer(result, Attribute) before the Return fact. Fires unconditionally.",
+  "files": [
+    {"role": "buggy", "path": "cases/01_intra_none_assign.py"}
+  ],
+  "primary_file": "cases/01_intra_none_assign.py",
+  "fixed_files": [
+    {"role": "fixed", "path": "fixed/01_intra_none_assign.py"}
+  ],
+  "should_detect": true,
+  "expected_regressions": [
+    {"func": "make_title", "symbol": "result", "kind": "attribute"}
+  ],
+  "value_flow_symbol": "result",
+  "task": "make_title() assigns None to result and then calls result.upper(). Fix the None-dereference — result should never be None when upper() is called."
+}

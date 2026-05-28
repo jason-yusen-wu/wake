@@ -1,0 +1,19 @@
+{
+  "id": "04",
+  "name": "inter_param_flow",
+  "description": "None flows through a callee via the nullable_from_param summary path. wrap_value returns its input unchanged; when called with a Nullable arg the return is Nullable.",
+  "analysis_note": "wrap_value: Param(val, annotation=Nullable). Return(FromVar(val)). With all-Unknown entry: base_return=Unknown. With val=Nullable: return Nullable → nullable_from_param[0]=True. process_input: text is Optional → Nullable. Assign(result, Call{wrap_value, [text]}) → apply_summary with [Nullable] → nullable_from_param[0]=True → result=Nullable. Consumer(result, Attribute) fires.",
+  "files": [
+    {"role": "buggy", "path": "cases/04_inter_param_flow.py"}
+  ],
+  "primary_file": "cases/04_inter_param_flow.py",
+  "fixed_files": [
+    {"role": "fixed", "path": "fixed/04_inter_param_flow.py"}
+  ],
+  "should_detect": true,
+  "expected_regressions": [
+    {"func": "process_input", "symbol": "result", "kind": "attribute"}
+  ],
+  "value_flow_symbol": "result",
+  "task": "process_input() calls wrap_value() which passes its Optional[str] argument through unchanged. The return value can be None when text is None. Add a None check before calling result.strip()."
+}

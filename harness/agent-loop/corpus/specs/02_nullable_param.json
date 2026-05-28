@@ -1,0 +1,19 @@
+{
+  "id": "02",
+  "name": "nullable_param",
+  "description": "Parameter annotated Optional[str] is dereferenced without a guard. Tests annotation-driven nullability.",
+  "analysis_note": "Param(text, annotation=Nullable) sets env[text]=Nullable via annotation override. Consumer(text, Attribute) fires in return text.strip().",
+  "files": [
+    {"role": "buggy", "path": "cases/02_nullable_param.py"}
+  ],
+  "primary_file": "cases/02_nullable_param.py",
+  "fixed_files": [
+    {"role": "fixed", "path": "fixed/02_nullable_param.py"}
+  ],
+  "should_detect": true,
+  "expected_regressions": [
+    {"func": "clean_input", "symbol": "text", "kind": "attribute"}
+  ],
+  "value_flow_symbol": "text",
+  "task": "clean_input() accepts an Optional[str] but calls .strip() without checking whether text is None. Add a guard so the function handles None safely."
+}

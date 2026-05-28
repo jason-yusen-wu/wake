@@ -1,0 +1,21 @@
+{
+  "id": "10",
+  "name": "benign_assert",
+  "description": "fetch_setting returns None; apply_setting uses the result twice without a guard. Buggy version has two attribute consumers. Fixed version uses assert to narrow value to NonNull before use — tests the Assume fact path. The fixed version must produce zero regressions.",
+  "analysis_note": "BUGGY: fetch_setting base_return=Nullable. value=Nullable → Consumer(value, Attribute) fires twice. FIXED: after NullFact::Assume(BranchCondition{symbol:'value', on_true:NonNull}), env[value]=NonNull → no Consumer fires. Tests that assert guards are respected.",
+  "files": [
+    {"role": "buggy", "path": "cases/10_benign_assert.py"}
+  ],
+  "primary_file": "cases/10_benign_assert.py",
+  "fixed_files": [
+    {"role": "fixed", "path": "fixed/10_benign_assert.py"}
+  ],
+  "should_detect": true,
+  "expected_regressions": [
+    {"func": "apply_setting", "symbol": "value", "kind": "attribute"},
+    {"func": "apply_setting", "symbol": "value", "kind": "attribute"}
+  ],
+  "expect_dedup": true,
+  "value_flow_symbol": "value",
+  "task": "apply_setting() calls fetch_setting() which returns None, then dereferences the result in two places without checking. Add an assertion or guard that ensures value is not None before the dereferences."
+}

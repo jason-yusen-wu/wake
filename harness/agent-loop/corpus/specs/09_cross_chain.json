@@ -1,0 +1,23 @@
+{
+  "id": "09",
+  "name": "cross_chain",
+  "description": "Three-hop cross-file None chain: database.py:query_user → service.py:get_user → handler.py:handle_get_user. None originates in database.py, propagates transparently through service.py, and is consumed in handler.py. Tests: (a) cross-file fixpoint iteration resolves the chain, (b) witness traces through all three files, (c) regression is attributed to handler.py.",
+  "analysis_note": "workspace_summaries fixpoint: query_user base_return=Nullable (returns None). get_user: row=query_user() → Nullable; return row → base_return=Nullable. handle_get_user: user=get_user() → Nullable (base_return); Consumer(user, Attribute) fires. Witness: NoneAssignment(query_user) → CallReturn(row=query_user()) → CallReturn(user=get_user()) → Consumer(user.name). Full 3-hop cross-file trace.",
+  "files": [
+    {"role": "supporting", "path": "cases/09_cross_chain/database.py"},
+    {"role": "supporting", "path": "cases/09_cross_chain/service.py"},
+    {"role": "buggy",      "path": "cases/09_cross_chain/handler.py"}
+  ],
+  "primary_file": "cases/09_cross_chain/handler.py",
+  "fixed_files": [
+    {"role": "supporting", "path": "fixed/09_cross_chain/database.py"},
+    {"role": "supporting", "path": "fixed/09_cross_chain/service.py"},
+    {"role": "fixed",      "path": "fixed/09_cross_chain/handler.py"}
+  ],
+  "should_detect": true,
+  "expected_regressions": [
+    {"func": "handle_get_user", "symbol": "user", "kind": "attribute"}
+  ],
+  "value_flow_symbol": "user",
+  "task": "handle_get_user() in handler.py calls get_user() from service.py, which calls query_user() from database.py. query_user always returns None (not yet implemented). The None propagates through get_user() to handle_get_user(), where user.name is accessed without a guard. Fix handler.py."
+}

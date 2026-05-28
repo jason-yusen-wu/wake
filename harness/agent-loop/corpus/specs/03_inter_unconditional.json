@@ -1,0 +1,19 @@
+{
+  "id": "03",
+  "name": "inter_unconditional",
+  "description": "Callee unconditionally returns None; caller subscript-dereferences the result. Tests summary-based interprocedural flow.",
+  "analysis_note": "fetch_config: Return(Literal(Nullable)) → base_return=Nullable. load_settings: Assign(config, Call{fetch_config}) → apply_summary → Nullable. Consumer(config, Subscript) fires.",
+  "files": [
+    {"role": "buggy", "path": "cases/03_inter_unconditional.py"}
+  ],
+  "primary_file": "cases/03_inter_unconditional.py",
+  "fixed_files": [
+    {"role": "fixed", "path": "fixed/03_inter_unconditional.py"}
+  ],
+  "should_detect": true,
+  "expected_regressions": [
+    {"func": "load_settings", "symbol": "config", "kind": "subscript"}
+  ],
+  "value_flow_symbol": "config",
+  "task": "fetch_config() returns None (not yet implemented). load_settings() assigns its return value to config and immediately subscripts it. Add a None check before accessing config[\"debug\"]."
+}

@@ -1,0 +1,21 @@
+{
+  "id": "07",
+  "name": "cross_direct",
+  "description": "Cross-file: processor.py calls fetch_record() defined in data_source.py. fetch_record returns None; process_record subscripts the result without a guard. Tests cross-file unique-name resolution for a bare (non-qualified) call.",
+  "analysis_note": "Both files registered in Workspace. workspace_summaries: fetch_record uniquely named → base_return=Nullable. process_record: record=fetch_record() → apply_workspace_summary → Nullable. Consumer(record, Subscript) in processor.py fires. Regression attributed to file=processor.py.",
+  "files": [
+    {"role": "supporting", "path": "cases/07_cross_direct/data_source.py"},
+    {"role": "buggy",      "path": "cases/07_cross_direct/processor.py"}
+  ],
+  "primary_file": "cases/07_cross_direct/processor.py",
+  "fixed_files": [
+    {"role": "supporting", "path": "fixed/07_cross_direct/data_source.py"},
+    {"role": "fixed",      "path": "fixed/07_cross_direct/processor.py"}
+  ],
+  "should_detect": true,
+  "expected_regressions": [
+    {"func": "process_record", "symbol": "record", "kind": "subscript"}
+  ],
+  "value_flow_symbol": "record",
+  "task": "process_record() in processor.py calls fetch_record() from data_source.py, which returns None when the record is not found. process_record() then subscripts the result without a None check. Fix processor.py to handle the None case."
+}

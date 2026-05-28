@@ -1,0 +1,19 @@
+{
+  "id": "06",
+  "name": "error_tolerant",
+  "description": "A sibling function has a dict-comprehension syntax error (missing colon). The extractor emits Unknown barriers for broken_helper but analyzes compute() independently. Tests error tolerance: bug in compute() is caught despite the parse error in the same file.",
+  "analysis_note": "broken_helper: tree-sitter ERROR node → NullFact::Unknown barrier. compute(): extracted independently. get_value: base_return=Nullable. val=Nullable → Consumer(val, Attribute) fires. The Unknown in broken_helper does not contaminate compute().",
+  "files": [
+    {"role": "buggy", "path": "cases/06_error_tolerant.py"}
+  ],
+  "primary_file": "cases/06_error_tolerant.py",
+  "fixed_files": [
+    {"role": "fixed", "path": "fixed/06_error_tolerant.py"}
+  ],
+  "should_detect": true,
+  "expected_regressions": [
+    {"func": "compute", "symbol": "val", "kind": "attribute"}
+  ],
+  "value_flow_symbol": "val",
+  "task": "compute() calls get_value() which returns None, then dereferences the result. Fix the None-dereference. (Note: broken_helper has a separate syntax error which is unrelated to your fix — leave it as-is.)"
+}

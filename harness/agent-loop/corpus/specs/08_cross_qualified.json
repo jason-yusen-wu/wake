@@ -1,0 +1,21 @@
+{
+  "id": "08",
+  "name": "cross_qualified",
+  "description": "Cross-file: server.py calls parser.parse_port() using qualified (module-attribute) syntax. parse_port returns None; the result is attribute-dereferenced without a guard. Tests the qualified-call resolution path: receiver='parser' is not a local variable, so the call resolves cross-file.",
+  "analysis_note": "classify_callee on parser.parse_port(port_text) → (callee='parse_port', receiver=Some('parser')). 'parser' is not in env (not a param or local) → receiver_blocks_resolution returns false → resolves to parse_port in workspace summaries → base_return=Nullable. port=Nullable → Consumer(port, Attribute) on port.to_bytes() fires. Regression in server.py.",
+  "files": [
+    {"role": "supporting", "path": "cases/08_cross_qualified/parser.py"},
+    {"role": "buggy",      "path": "cases/08_cross_qualified/server.py"}
+  ],
+  "primary_file": "cases/08_cross_qualified/server.py",
+  "fixed_files": [
+    {"role": "supporting", "path": "fixed/08_cross_qualified/parser.py"},
+    {"role": "fixed",      "path": "fixed/08_cross_qualified/server.py"}
+  ],
+  "should_detect": true,
+  "expected_regressions": [
+    {"func": "start_server", "symbol": "port", "kind": "attribute"}
+  ],
+  "value_flow_symbol": "port",
+  "task": "start_server() in server.py calls parser.parse_port() which returns None for invalid input, then calls port.to_bytes() without checking for None. Fix server.py to handle the case where parse_port returns None."
+}

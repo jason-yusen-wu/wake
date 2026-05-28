@@ -1,0 +1,21 @@
+{
+  "id": "05",
+  "name": "multi_consumer",
+  "description": "One None source (get_username returns None) flows to two attribute consumer sites. Tests feedback dedup: one ShapedFeedback with two AffectedConsumers, not two separate findings.",
+  "analysis_note": "get_username: base_return=Nullable. render_user: name=Nullable. Consumer(name, Attribute) emitted twice (name.upper() and name.center()). DiffKey ordinals distinguish them; shape_feedback groups by root cause into one finding with two consumers.",
+  "files": [
+    {"role": "buggy", "path": "cases/05_multi_consumer.py"}
+  ],
+  "primary_file": "cases/05_multi_consumer.py",
+  "fixed_files": [
+    {"role": "fixed", "path": "fixed/05_multi_consumer.py"}
+  ],
+  "should_detect": true,
+  "expected_regressions": [
+    {"func": "render_user", "symbol": "name", "kind": "attribute"},
+    {"func": "render_user", "symbol": "name", "kind": "attribute"}
+  ],
+  "expect_dedup": true,
+  "value_flow_symbol": "name",
+  "task": "render_user() calls get_username() which returns None (user not found). The result is used without a None check in two places: name.upper() and name.center(). Fix both dereferences."
+}
