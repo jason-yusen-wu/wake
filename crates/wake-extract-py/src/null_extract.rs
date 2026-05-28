@@ -78,61 +78,61 @@ fn extract_null_params(src: &[u8], params: Node<'_>, facts: &mut Vec<NullFact>) 
                 // the identifier is the first named child.
                 let name = child.named_child(0);
                 let type_node = child.child_by_field_name("type");
-                if let Some(name) = name {
-                    if name.kind() == "identifier" {
-                        let annotation = type_node
-                            .map(|t| parse_annotation_text(node_text(src, t)))
-                            .unwrap_or(NullabilityValue::Unknown);
-                        facts.push(NullFact::Param(NullDef {
-                            node: node_id(name),
-                            symbol: node_text(src, name).to_string(),
-                            annotation,
-                            rhs: RhsNullability::Unknown,
-                        }));
-                    }
+                if let Some(name) = name
+                    && name.kind() == "identifier"
+                {
+                    let annotation = type_node
+                        .map(|t| parse_annotation_text(node_text(src, t)))
+                        .unwrap_or(NullabilityValue::Unknown);
+                    facts.push(NullFact::Param(NullDef {
+                        node: node_id(name),
+                        symbol: node_text(src, name).to_string(),
+                        annotation,
+                        rhs: RhsNullability::Unknown,
+                    }));
                 }
             }
             "default_parameter" => {
                 // def f(x=default): x is Unknown (default might or might not be None)
-                if let Some(name) = child.child_by_field_name("name") {
-                    if name.kind() == "identifier" {
-                        facts.push(NullFact::Param(NullDef {
-                            node: node_id(name),
-                            symbol: node_text(src, name).to_string(),
-                            annotation: NullabilityValue::Unknown,
-                            rhs: RhsNullability::Unknown,
-                        }));
-                    }
+                if let Some(name) = child.child_by_field_name("name")
+                    && name.kind() == "identifier"
+                {
+                    facts.push(NullFact::Param(NullDef {
+                        node: node_id(name),
+                        symbol: node_text(src, name).to_string(),
+                        annotation: NullabilityValue::Unknown,
+                        rhs: RhsNullability::Unknown,
+                    }));
                 }
             }
             "typed_default_parameter" => {
                 let name = child.child_by_field_name("name");
                 let type_node = child.child_by_field_name("type");
-                if let Some(name) = name {
-                    if name.kind() == "identifier" {
-                        let annotation = type_node
-                            .map(|t| parse_annotation_text(node_text(src, t)))
-                            .unwrap_or(NullabilityValue::Unknown);
-                        facts.push(NullFact::Param(NullDef {
-                            node: node_id(name),
-                            symbol: node_text(src, name).to_string(),
-                            annotation,
-                            rhs: RhsNullability::Unknown,
-                        }));
-                    }
+                if let Some(name) = name
+                    && name.kind() == "identifier"
+                {
+                    let annotation = type_node
+                        .map(|t| parse_annotation_text(node_text(src, t)))
+                        .unwrap_or(NullabilityValue::Unknown);
+                    facts.push(NullFact::Param(NullDef {
+                        node: node_id(name),
+                        symbol: node_text(src, name).to_string(),
+                        annotation,
+                        rhs: RhsNullability::Unknown,
+                    }));
                 }
             }
             // *args, **kwargs — treated as Unknown
             "list_splat_pattern" | "dictionary_splat_pattern" => {
-                if let Some(inner) = child.child(1) {
-                    if inner.kind() == "identifier" {
-                        facts.push(NullFact::Param(NullDef {
-                            node: node_id(inner),
-                            symbol: node_text(src, inner).to_string(),
-                            annotation: NullabilityValue::Unknown,
-                            rhs: RhsNullability::Unknown,
-                        }));
-                    }
+                if let Some(inner) = child.child(1)
+                    && inner.kind() == "identifier"
+                {
+                    facts.push(NullFact::Param(NullDef {
+                        node: node_id(inner),
+                        symbol: node_text(src, inner).to_string(),
+                        annotation: NullabilityValue::Unknown,
+                        rhs: RhsNullability::Unknown,
+                    }));
                 }
             }
             "ERROR" => facts.push(NullFact::Unknown(node_id(child))),
@@ -225,14 +225,14 @@ fn extract_call_stmt(src: &[u8], call_node: Node<'_>, facts: &mut Vec<NullFact>)
     collect_consumers(src, call_node, facts);
 
     // Also record the interprocedural call site for summary application.
-    if let Some(func) = call_node.child_by_field_name("function") {
-        if func.kind() == "identifier" {
-            facts.push(NullFact::CallStmt(NullCallSite {
-                node: node_id(call_node),
-                callee: node_text(src, func).to_string(),
-                args: extract_call_args(src, call_node),
-            }));
-        }
+    if let Some(func) = call_node.child_by_field_name("function")
+        && func.kind() == "identifier"
+    {
+        facts.push(NullFact::CallStmt(NullCallSite {
+            node: node_id(call_node),
+            callee: node_text(src, func).to_string(),
+            args: extract_call_args(src, call_node),
+        }));
     }
 }
 

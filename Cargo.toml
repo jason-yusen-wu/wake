@@ -5,5 +5,6 @@ members = [
     "crates/wake-extract-py",
     "crates/wake-ir",
     "crates/wake-prop-null",
+    "crates/wake-diff",
 ]
 resolver = "2"

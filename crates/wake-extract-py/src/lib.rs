@@ -93,26 +93,26 @@ fn extract_parameters(src: &[u8], params: Node<'_>, facts: &mut Vec<Fact>) {
             }
             // typed_parameter: (name: identifier, type: ...) — pull out the name
             "typed_parameter" | "default_parameter" => {
-                if let Some(name) = child.child_by_field_name("name") {
-                    if name.kind() == "identifier" {
-                        facts.push(Fact::Def(Def {
-                            node: node_id(name),
-                            symbol: node_text(src, name).to_string(),
-                            kind: DefKind::Parameter,
-                        }));
-                    }
+                if let Some(name) = child.child_by_field_name("name")
+                    && name.kind() == "identifier"
+                {
+                    facts.push(Fact::Def(Def {
+                        node: node_id(name),
+                        symbol: node_text(src, name).to_string(),
+                        kind: DefKind::Parameter,
+                    }));
                 }
             }
             "list_splat_pattern" | "dictionary_splat_pattern" => {
                 // *args / **kwargs — extract inner identifier
-                if let Some(inner) = child.child(1) {
-                    if inner.kind() == "identifier" {
-                        facts.push(Fact::Def(Def {
-                            node: node_id(inner),
-                            symbol: node_text(src, inner).to_string(),
-                            kind: DefKind::Parameter,
-                        }));
-                    }
+                if let Some(inner) = child.child(1)
+                    && inner.kind() == "identifier"
+                {
+                    facts.push(Fact::Def(Def {
+                        node: node_id(inner),
+                        symbol: node_text(src, inner).to_string(),
+                        kind: DefKind::Parameter,
+                    }));
                 }
             }
             "ERROR" => {
@@ -153,14 +153,14 @@ fn extract_stmt(src: &[u8], stmt: Node<'_>, facts: &mut Vec<Fact>) {
                     }
                     "augmented_assignment" => {
                         // x += expr: x is both a use and a def.
-                        if let Some(lhs) = inner.child_by_field_name("left") {
-                            if lhs.kind() == "identifier" {
-                                // Use of the current value
-                                facts.push(Fact::Use(Use {
-                                    node: node_id(lhs),
-                                    symbol: node_text(src, lhs).to_string(),
-                                }));
-                            }
+                        if let Some(lhs) = inner.child_by_field_name("left")
+                            && lhs.kind() == "identifier"
+                        {
+                            // Use of the current value
+                            facts.push(Fact::Use(Use {
+                                node: node_id(lhs),
+                                symbol: node_text(src, lhs).to_string(),
+                            }));
                         }
                         if let Some(rhs) = inner.child_by_field_name("right") {
                             collect_uses(src, rhs, facts);
