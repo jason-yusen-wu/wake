@@ -9,9 +9,9 @@
 //! benign-edit stability sweep.
 
 use salsa::Setter;
-use wake_diff::regressions_with_witnesses;
-use wake_engine::{Db, SourceFile};
-use wake_prop_null::{null_regressions, null_summaries};
+use wake_diff::{regressions_with_witnesses, workspace_regressions_with_witnesses};
+use wake_engine::{Db, SourceFile, Workspace};
+use wake_prop_null::{null_regressions, null_summaries, workspace_regressions, workspace_summaries};
 use wake_schema::{NullRegression, NullabilityValue};
 
 #[salsa::db]
@@ -137,6 +137,87 @@ fn incremental_matches_scratch_on_random_edits() {
                 canon_reports(&inc_db, inc_file),
                 canon_reports(&scratch_db, scratch_file),
                 "regression reports/witnesses diverged at seed {seed} step {step}\n--- text ---\n{text}"
+            );
+        }
+    }
+}
+
+// ── Cross-file oracle: workspace incremental == workspace from-scratch ─────────
+
+fn ws_reg_key(r: &NullRegression) -> (String, String, u32, u32, String, u8) {
+    (
+        r.file.clone(),
+        r.func_name.clone(),
+        r.consumer_node.start_byte,
+        r.consumer_node.end_byte,
+        r.object_symbol.clone(),
+        r.kind as u8,
+    )
+}
+
+fn canon_ws_regressions(db: &TestDb, ws: Workspace) -> Vec<NullRegression> {
+    let mut all = workspace_regressions(db, ws);
+    all.sort_by_key(ws_reg_key);
+    all
+}
+
+fn canon_ws_reports(db: &TestDb, ws: Workspace) -> Vec<(NullRegression, usize)> {
+    let mut reports: Vec<(NullRegression, usize)> = workspace_regressions_with_witnesses(db, ws)
+        .into_iter()
+        .map(|r| (r.regression, r.witness.len()))
+        .collect();
+    reports.sort_by_key(|(r, _)| ws_reg_key(r));
+    reports
+}
+
+#[test]
+fn workspace_incremental_matches_scratch() {
+    let frags = fragments();
+    let paths = ["f0.py", "f1.py", "f2.py", "f3.py"];
+
+    for seed in 1..=6u64 {
+        let mut rng = Rng(seed.wrapping_mul(0x2545F4914F6CDD1D).wrapping_add(7));
+
+        // Incremental workspace: fixed file set, contents edited in place.
+        let mut contents: Vec<usize> = paths.iter().map(|_| rng.below(frags.len())).collect();
+        let mut inc_db = TestDb::default();
+        let inc_files: Vec<(String, SourceFile)> = paths
+            .iter()
+            .zip(&contents)
+            .map(|(p, &c)| (p.to_string(), SourceFile::new(&inc_db, frags[c].to_string())))
+            .collect();
+        let inc_handles: Vec<SourceFile> = inc_files.iter().map(|(_, f)| *f).collect();
+        let inc_ws = Workspace::new(&inc_db, inc_files);
+
+        for step in 0..50 {
+            // Edit one file's contents.
+            let fi = rng.below(paths.len());
+            contents[fi] = rng.below(frags.len());
+            inc_handles[fi].set_contents(&mut inc_db).to(frags[contents[fi]].to_string());
+
+            // Build the same workspace from scratch.
+            let scratch_db = TestDb::default();
+            let scratch_files: Vec<(String, SourceFile)> = paths
+                .iter()
+                .zip(&contents)
+                .map(|(p, &c)| (p.to_string(), SourceFile::new(&scratch_db, frags[c].to_string())))
+                .collect();
+            let scratch_ws = Workspace::new(&scratch_db, scratch_files);
+
+            assert_eq!(
+                workspace_summaries(&inc_db, inc_ws),
+                workspace_summaries(&scratch_db, scratch_ws),
+                "ws summaries diverged at seed {seed} step {step}"
+            );
+            assert_eq!(
+                canon_ws_regressions(&inc_db, inc_ws),
+                canon_ws_regressions(&scratch_db, scratch_ws),
+                "ws regressions diverged at seed {seed} step {step}"
+            );
+            assert_eq!(
+                canon_ws_reports(&inc_db, inc_ws),
+                canon_ws_reports(&scratch_db, scratch_ws),
+                "ws reports/witnesses diverged at seed {seed} step {step}"
             );
         }
     }

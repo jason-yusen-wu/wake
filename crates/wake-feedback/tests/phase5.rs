@@ -52,6 +52,7 @@ fn node(start: u32, end: u32) -> NodeId {
 
 fn make_regression(consumer_start: u32, symbol: &str, kind: ConsumerKind) -> NullRegression {
     NullRegression {
+        file: String::new(),
         func_node: node(0, 100),
         func_name: "f".to_string(),
         consumer_node: node(consumer_start, consumer_start + 10),

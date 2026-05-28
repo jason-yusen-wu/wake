@@ -116,8 +116,10 @@ pub enum RhsNullability {
     Literal(NullabilityValue),
     /// Copied from another local: `x = y`
     FromVar(String),
-    /// Direct call to a named function: `x = f(a, b)`
-    Call { callee: String, args: Vec<CallArgKind> },
+    /// Call to a named function: `x = f(a, b)` (receiver None) or a qualified
+    /// `x = m.f(a, b)` (receiver Some("m")). A qualified call resolves cross-file
+    /// only when the receiver is not a local variable (i.e. it's a module).
+    Call { callee: String, args: Vec<CallArgKind>, receiver: Option<String> },
     /// Anything we cannot classify: binary ops, attribute access, method calls, etc.
     Unknown,
 }
@@ -159,6 +161,8 @@ pub struct NullCallSite {
     pub node: NodeId,
     pub callee: String,
     pub args: Vec<CallArgKind>,
+    /// `Some("m")` for a qualified call `m.f(...)`, `None` for a bare `f(...)`.
+    pub receiver: Option<String>,
 }
 
 /// A return statement's value, for summary computation.
@@ -275,6 +279,11 @@ pub struct NullFileFacts {
 /// A confirmed potential None-dereference: the consumer variable is Nullable at this site.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
 pub struct NullRegression {
+    /// Path of the file containing the consumer. Empty for single-file (path-less)
+    /// analysis; set to the workspace path for cross-file analysis. Together with
+    /// `func_node` it disambiguates byte-range node ids, which are only unique
+    /// within a single file.
+    pub file: String,
     /// Node of the function that *contains* the consumer (the callee, for
     /// interprocedural regressions surfaced at a call site).
     pub func_node: NodeId,

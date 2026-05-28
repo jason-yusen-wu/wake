@@ -232,14 +232,34 @@ fn extract_call_stmt(src: &[u8], call_node: Node<'_>, facts: &mut Vec<NullFact>)
     collect_consumers(src, call_node, facts);
 
     // Also record the interprocedural call site for summary application.
-    if let Some(func) = call_node.child_by_field_name("function")
-        && func.kind() == "identifier"
-    {
+    if let Some((callee, receiver)) = classify_callee(src, call_node) {
         facts.push(NullFact::CallStmt(NullCallSite {
             node: node_id(call_node),
-            callee: node_text(src, func).to_string(),
+            callee,
             args: extract_call_args(src, call_node),
+            receiver,
         }));
+    }
+}
+
+/// Classify a call's function node into `(callee, receiver)`:
+///   `f(...)`   → ("f", None)            — bare call
+///   `m.f(...)` → ("f", Some("m"))       — qualified call (m may be a module)
+/// Anything more complex (chained attributes, computed callees) is not resolvable.
+fn classify_callee(src: &[u8], call_node: Node<'_>) -> Option<(String, Option<String>)> {
+    let func = call_node.child_by_field_name("function")?;
+    match func.kind() {
+        "identifier" => Some((node_text(src, func).to_string(), None)),
+        "attribute" => {
+            let obj = func.child_by_field_name("object")?;
+            let attr = func.child_by_field_name("attribute")?;
+            if obj.kind() == "identifier" && attr.kind() == "identifier" {
+                Some((node_text(src, attr).to_string(), Some(node_text(src, obj).to_string())))
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
@@ -658,13 +678,14 @@ fn classify_rhs(src: &[u8], rhs: Node<'_>) -> RhsNullability {
         }
         "identifier" => RhsNullability::FromVar(node_text(src, rhs).to_string()),
         "call" => {
-            // Direct call to a named function → interprocedural tracking.
-            match rhs.child_by_field_name("function") {
-                Some(func) if func.kind() == "identifier" => RhsNullability::Call {
-                    callee: node_text(src, func).to_string(),
+            // Direct or qualified call to a named function → interprocedural tracking.
+            match classify_callee(src, rhs) {
+                Some((callee, receiver)) => RhsNullability::Call {
+                    callee,
                     args: extract_call_args(src, rhs),
+                    receiver,
                 },
-                _ => RhsNullability::Unknown,
+                None => RhsNullability::Unknown,
             }
         }
         // Function calls, attribute access, binary ops, etc. — all Unknown.

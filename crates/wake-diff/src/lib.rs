@@ -1,10 +1,12 @@
 use std::collections::HashMap;
-use wake_engine::{Db, SourceFile};
+use wake_engine::{Db, SourceFile, Workspace};
 use wake_schema::{
     CallArgKind, ConsumerKind, NodeId, NullFact, NullFileFacts, NullFunctionFacts, NullReturn,
     NullRegression, NullabilityValue, RhsNullability,
 };
-use wake_prop_null::{FuncSummary, null_regressions, null_summaries};
+use wake_prop_null::{
+    FuncSummary, null_regressions, null_summaries, workspace_regressions, workspace_summaries,
+};
 
 const MAX_WITNESS_DEPTH: usize = 8;
 
@@ -76,6 +78,42 @@ pub fn regressions_with_witnesses(db: &dyn Db, file: SourceFile) -> Vec<Regressi
     reports
 }
 
+/// Cross-file regressions with witnesses. Locates each consumer's function by
+/// `(file, func_node)` and resolves callee witnesses by unique name across the
+/// whole workspace.
+#[salsa::tracked]
+pub fn workspace_regressions_with_witnesses(db: &dyn Db, ws: Workspace) -> Vec<RegressionReport> {
+    let regressions = workspace_regressions(db, ws);
+    let summaries = workspace_summaries(db, ws);
+    let summary_map: HashMap<String, &FuncSummary> =
+        summaries.entries.iter().map(|(n, s)| (n.clone(), s)).collect();
+
+    let files = ws.files(db);
+    let per_file: Vec<(String, NullFileFacts)> = files
+        .iter()
+        .map(|(p, sf)| (p.clone(), wake_extract_py::extract_null_file(db, *sf)))
+        .collect();
+    // Merged view for callee-by-name lookup during witness tracing. Only
+    // uniquely-named functions are ever resolved, so the cross-file callee is
+    // unambiguous despite byte-range node ids colliding across files.
+    let mut merged = NullFileFacts::default();
+    for (_p, ff) in &per_file {
+        merged.functions.extend(ff.functions.iter().cloned());
+    }
+
+    let mut reports = Vec::new();
+    for reg in &regressions {
+        let func = per_file
+            .iter()
+            .find(|(p, _)| p == &reg.file)
+            .and_then(|(_, ff)| ff.functions.iter().find(|f| f.func_node == reg.func_node));
+        let witness =
+            func.map(|f| compute_witness(f, reg, &merged, &summary_map)).unwrap_or_default();
+        reports.push(RegressionReport { regression: reg.clone(), witness });
+    }
+    reports
+}
+
 // ── Pure functions ────────────────────────────────────────────────────────────
 
 /// Position-independent identity of a regression: which function, which
@@ -83,18 +121,19 @@ pub fn regressions_with_witnesses(db: &dyn Db, file: SourceFile) -> Vec<Regressi
 /// Deliberately excludes raw byte offsets so that an edit which merely shifts
 /// text (a comment, an unrelated line) does not make an unchanged regression
 /// look new or fixed.
-type DiffKey = (String, String, ConsumerKind, usize);
+type DiffKey = (String, String, String, ConsumerKind, usize);
 
 /// Assign a stable `DiffKey` to each report. The occurrence ordinal is taken
 /// from the relative byte order of consumers sharing the same
-/// (function, symbol, kind), which is invariant under offset-only edits.
+/// (file, function, symbol, kind), which is invariant under offset-only edits.
 fn keyed(reports: &[RegressionReport]) -> HashMap<DiffKey, &RegressionReport> {
     let mut order: Vec<usize> = (0..reports.len()).collect();
     order.sort_by(|&i, &j| {
         let a = &reports[i].regression;
         let b = &reports[j].regression;
-        a.func_name
-            .cmp(&b.func_name)
+        a.file
+            .cmp(&b.file)
+            .then_with(|| a.func_name.cmp(&b.func_name))
             .then_with(|| a.object_symbol.cmp(&b.object_symbol))
             .then_with(|| a.kind.cmp(&b.kind))
             .then_with(|| a.consumer_node.start_byte.cmp(&b.consumer_node.start_byte))
@@ -103,17 +142,18 @@ fn keyed(reports: &[RegressionReport]) -> HashMap<DiffKey, &RegressionReport> {
 
     let mut map = HashMap::new();
     let mut ordinal = 0usize;
-    let mut prev: Option<(&str, &str, ConsumerKind)> = None;
+    let mut prev: Option<(&str, &str, &str, ConsumerKind)> = None;
     for &i in &order {
         let r = &reports[i].regression;
-        let group = (r.func_name.as_str(), r.object_symbol.as_str(), r.kind);
+        let group = (r.file.as_str(), r.func_name.as_str(), r.object_symbol.as_str(), r.kind);
         if prev == Some(group) {
             ordinal += 1;
         } else {
             ordinal = 0;
             prev = Some(group);
         }
-        let key = (r.func_name.clone(), r.object_symbol.clone(), r.kind, ordinal);
+        let key =
+            (r.file.clone(), r.func_name.clone(), r.object_symbol.clone(), r.kind, ordinal);
         map.insert(key, &reports[i]);
     }
     map
@@ -263,7 +303,7 @@ fn trace_backward(
                 });
                 steps
             }
-            RhsNullability::Call { callee, args } => {
+            RhsNullability::Call { callee, args, .. } => {
                 let callee = callee.clone();
                 let args = args.clone();
                 let node = d.node;
@@ -371,7 +411,7 @@ fn trace_callee_return(
             RhsNullability::FromVar(sym) => {
                 return trace_backward(&flat, sym, *pos, file_facts, summaries, depth);
             }
-            RhsNullability::Call { callee, args } => {
+            RhsNullability::Call { callee, args, .. } => {
                 return explain_call_nullable(
                     callee,
                     args,

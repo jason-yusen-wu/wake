@@ -1,3 +1,3 @@
 mod db;
 
-pub use db::{Database, Db, SourceFile};
+pub use db::{Database, Db, SourceFile, Workspace};

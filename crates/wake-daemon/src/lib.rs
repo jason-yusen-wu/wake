@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use salsa::Setter;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use wake_diff::{diff_results, regressions_with_witnesses, WitnessStep};
-use wake_engine::{Database, SourceFile};
+use wake_diff::{diff_results, workspace_regressions_with_witnesses, RegressionReport, WitnessStep};
+use wake_engine::{Database, SourceFile, Workspace};
 use wake_feedback::{shape_feedback, AffectedConsumer, Confidence, RootCause, ShapedFeedback};
 use wake_ir::def_use_edges;
 use wake_schema::{ConsumerKind, NodeId, NullRegression};
@@ -72,6 +72,8 @@ pub struct Daemon {
     files: HashMap<String, SourceFile>,
     /// uri → current source text (kept to support blast-radius preview + restore)
     texts: HashMap<String, String>,
+    /// The cross-file analysis unit holding all registered files (created lazily).
+    ws: Option<Workspace>,
 }
 
 impl Daemon {
@@ -113,13 +115,19 @@ impl Daemon {
             Some(u) => u.to_string(),
             None => return Response::err(id, ERR_PARAMS, "missing 'uri'"),
         };
-        let file = match self.files.get(&uri).copied() {
-            Some(f) => f,
-            None => return Response::err(id, ERR_PARAMS, format!("unknown file: {uri}")),
+        if !self.files.contains_key(&uri) {
+            return Response::err(id, ERR_PARAMS, format!("unknown file: {uri}"));
+        }
+        let Some(ws) = self.ws else {
+            return Response::err(id, ERR_INTERNAL, "workspace not initialized");
         };
 
-        let reports = regressions_with_witnesses(&self.db, file);
-        let shaped = shape_feedback(&reports);
+        // Cross-file analysis over the whole workspace, then keep only the
+        // regressions whose consumer lives in the requested file.
+        let reports = workspace_regressions_with_witnesses(&self.db, ws);
+        let mine: Vec<RegressionReport> =
+            reports.into_iter().filter(|r| r.regression.file == uri).collect();
+        let shaped = shape_feedback(&mine);
 
         Response::ok(
             id,
@@ -147,16 +155,19 @@ impl Daemon {
             Some(f) => f,
             None => return Response::err(id, ERR_PARAMS, format!("unknown file: {uri}")),
         };
+        let Some(ws) = self.ws else {
+            return Response::err(id, ERR_INTERNAL, "workspace not initialized");
+        };
         let old_text = self.texts[&uri].clone();
 
-        // Before: current database state.
-        let before = regressions_with_witnesses(&self.db, file);
+        // Before: current workspace state (cross-file).
+        let before = workspace_regressions_with_witnesses(&self.db, ws);
 
-        // Apply the proposed new text.
+        // Apply the proposed new text to this one file.
         file.set_contents(&mut self.db).to(new_text);
-        let after = regressions_with_witnesses(&self.db, file);
+        let after = workspace_regressions_with_witnesses(&self.db, ws);
 
-        // Diff, then restore the original text.
+        // Diff across the whole workspace, then restore the original text.
         let diff = diff_results(&before, &after);
         file.set_contents(&mut self.db).to(old_text);
 
@@ -227,13 +238,33 @@ impl Daemon {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn upsert_file(&mut self, uri: &str, text: String) {
-        if let Some(file) = self.files.get(uri).copied() {
+        let added = if let Some(file) = self.files.get(uri).copied() {
             file.set_contents(&mut self.db).to(text.clone());
+            false
         } else {
             let file = SourceFile::new(&self.db, text.clone());
             self.files.insert(uri.to_string(), file);
-        }
+            true
+        };
         self.texts.insert(uri.to_string(), text);
+        // Only resync the workspace file-set when a file is added; editing an
+        // existing file changes its SourceFile contents (not the set), which
+        // salsa already tracks.
+        if added {
+            self.sync_workspace();
+        }
+    }
+
+    /// Rebuild the Workspace's file list (sorted by uri for a stable order so
+    /// salsa doesn't see spurious changes).
+    fn sync_workspace(&mut self) {
+        let mut entries: Vec<(String, SourceFile)> =
+            self.files.iter().map(|(u, f)| (u.clone(), *f)).collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        match self.ws {
+            Some(ws) => { ws.set_files(&mut self.db).to(entries); }
+            None => self.ws = Some(Workspace::new(&self.db, entries)),
+        }
     }
 }
 

@@ -34,6 +34,12 @@ class WakeClient:
 
     Spawns the daemon on construction and communicates over stdio.
     All public methods are thread-safe.
+
+    Register every file in the project with ``did_change`` to enable cross-file
+    analysis: a None value flowing from one module into a dereference in another
+    is reported against the consuming file. Calls resolve across files by unique
+    function name (``from m import f; f()`` and ``import m; m.f()``); an ambiguous
+    name is left Unknown rather than guessed.
     """
 
     def __init__(self, daemon_path: str | Path = "wake-daemon") -> None:

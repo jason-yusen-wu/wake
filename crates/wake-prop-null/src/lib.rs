@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use wake_engine::{Db, SourceFile};
+use wake_engine::{Db, SourceFile, Workspace};
 use wake_schema::{
     BranchCondition, CallArgKind, NarrowEffect, NodeId, NullBranch, NullCallSite, NullFact,
     NullFunctionFacts, NullLoop, NullRegression, NullabilityValue, RhsNullability,
@@ -77,7 +77,7 @@ pub fn null_regressions(db: &dyn Db, file: SourceFile) -> FunctionRegressions {
         let param_names = collect_param_names(f);
         let entry_env: HashMap<String, NullabilityValue> =
             param_names.iter().map(|p| (p.clone(), NullabilityValue::Unknown)).collect();
-        let (regs, _) = analyze_function_full(f, entry_env, &summaries);
+        let (regs, _) = analyze_function_full(f, "", entry_env, &summaries);
         all.extend(regs);
     }
 
@@ -97,6 +97,86 @@ pub fn null_regressions(db: &dyn Db, file: SourceFile) -> FunctionRegressions {
         .collect()
 }
 
+// ── Workspace (cross-file) analysis ────────────────────────────────────────────
+
+/// Global interprocedural summaries across all files in the workspace.
+///
+/// A function name defined exactly once across the workspace is resolvable by
+/// any caller (in any file); an ambiguous name resolves to Unknown. This is how
+/// cross-file value flow is achieved without a full Python import resolver
+/// (`from m import f; f()` and `import m; m.f()` both resolve by unique name).
+#[salsa::tracked]
+pub fn workspace_summaries(db: &dyn Db, ws: Workspace) -> FileSummaries {
+    let files = ws.files(db);
+    let facts: Vec<(String, wake_schema::NullFileFacts)> = files
+        .iter()
+        .map(|(path, sf)| (path.clone(), wake_extract_py::extract_null_file(db, *sf)))
+        .collect();
+    let funcs: Vec<(&str, &NullFunctionFacts)> = facts
+        .iter()
+        .flat_map(|(path, ff)| ff.functions.iter().map(move |f| (path.as_str(), f)))
+        .collect();
+    FileSummaries { entries: compute_workspace_summaries(&funcs) }
+}
+
+/// Cross-file nullability regressions for every function in the workspace.
+/// Each regression carries the path of the file containing its consumer.
+#[salsa::tracked]
+pub fn workspace_regressions(db: &dyn Db, ws: Workspace) -> Vec<NullRegression> {
+    let files = ws.files(db);
+    let sums = workspace_summaries(db, ws);
+    let summaries: HashMap<String, &FuncSummary> =
+        sums.entries.iter().map(|(n, s)| (n.clone(), s)).collect();
+
+    let mut all: Vec<NullRegression> = Vec::new();
+    for (path, sf) in files {
+        let ff = wake_extract_py::extract_null_file(db, *sf);
+        for f in &ff.functions {
+            let param_names = collect_param_names(f);
+            let entry_env: HashMap<String, NullabilityValue> =
+                param_names.iter().map(|p| (p.clone(), NullabilityValue::Unknown)).collect();
+            let (regs, _) = analyze_function_full(f, path, entry_env, &summaries);
+            all.extend(regs);
+        }
+    }
+    let mut seen: HashSet<NullRegression> = HashSet::new();
+    all.retain(|r| seen.insert(r.clone()));
+    all
+}
+
+/// Fixpoint summary computation over all (file, function) pairs in the workspace,
+/// resolving only uniquely-named functions.
+fn compute_workspace_summaries(funcs: &[(&str, &NullFunctionFacts)]) -> Vec<(String, FuncSummary)> {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for (_p, f) in funcs {
+        *counts.entry(f.func_name.as_str()).or_default() += 1;
+    }
+    let unique: Vec<(&str, &NullFunctionFacts)> =
+        funcs.iter().copied().filter(|(_p, f)| counts[f.func_name.as_str()] == 1).collect();
+
+    let mut computed: HashMap<String, FuncSummary> = HashMap::new();
+    let bound = unique.len() + 1;
+    for _ in 0..bound {
+        let mut changed = false;
+        for &(path, f) in &unique {
+            let param_names = collect_param_names(f);
+            let summary = compute_func_summary(f, path, &param_names, &computed);
+            if computed.get(&f.func_name) != Some(&summary) {
+                computed.insert(f.func_name.clone(), summary);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    unique
+        .iter()
+        .filter_map(|&(_p, f)| computed.get(&f.func_name).map(|s| (f.func_name.clone(), s.clone())))
+        .collect()
+}
+
 // ── Summary computation ───────────────────────────────────────────────────────
 
 fn compute_file_summaries(file_facts: &wake_schema::NullFileFacts) -> FileSummaries {
@@ -111,7 +191,7 @@ fn compute_file_summaries(file_facts: &wake_schema::NullFileFacts) -> FileSummar
         let mut changed = false;
         for func in &file_facts.functions {
             let param_names = collect_param_names(func);
-            let summary = compute_func_summary(func, &param_names, &computed);
+            let summary = compute_func_summary(func, "", &param_names, &computed);
             if computed.get(&func.func_name) != Some(&summary) {
                 computed.insert(func.func_name.clone(), summary);
                 changed = true;
@@ -133,6 +213,7 @@ fn compute_file_summaries(file_facts: &wake_schema::NullFileFacts) -> FileSummar
 
 fn compute_func_summary(
     func: &NullFunctionFacts,
+    file: &str,
     param_names: &[String],
     summaries: &HashMap<String, FuncSummary>,
 ) -> FuncSummary {
@@ -142,7 +223,7 @@ fn compute_func_summary(
 
     // Step 1: run with all params Unknown → base return.
     let base_env = uniform_env(param_names, NullabilityValue::Unknown);
-    let (_, base_return) = analyze_function_full(func, base_env, &summary_refs);
+    let (_, base_return) = analyze_function_full(func, file, base_env, &summary_refs);
 
     let n = param_names.len();
     let mut nullable_from_param = vec![false; n];
@@ -152,7 +233,7 @@ fn compute_func_summary(
     for i in 0..n {
         let mut env = uniform_env(param_names, NullabilityValue::Unknown);
         env.insert(param_names[i].clone(), NullabilityValue::Nullable);
-        let (regs, ret) = analyze_function_full(func, env, &summary_refs);
+        let (regs, ret) = analyze_function_full(func, file, env, &summary_refs);
         nullable_from_param[i] = ret == NullabilityValue::Nullable;
         regressions_from_param[i] = regs;
     }
@@ -182,10 +263,12 @@ fn uniform_env(param_names: &[String], val: NullabilityValue) -> HashMap<String,
 /// - Multiple return facts are joined with the three-valued lattice join.
 pub fn analyze_function_full(
     func: &NullFunctionFacts,
+    file: &str,
     initial_env: HashMap<String, NullabilityValue>,
     summaries: &HashMap<String, &FuncSummary>,
 ) -> (Vec<NullRegression>, NullabilityValue) {
     let ctx = AnalysisCtx {
+        file,
         func_node: func.func_node,
         func_name: &func.func_name,
         summaries,
@@ -199,6 +282,8 @@ pub fn analyze_function_full(
 
 /// Per-function context threaded through the recursive walk.
 struct AnalysisCtx<'a> {
+    /// Path of the file being analyzed (empty for single-file, path-less analysis).
+    file: &'a str,
     func_node: NodeId,
     func_name: &'a str,
     summaries: &'a HashMap<String, &'a FuncSummary>,
@@ -235,6 +320,7 @@ fn run_facts(
             NullFact::Consumer(consumer) => {
                 if env.get(&consumer.object_symbol) == Some(&NullabilityValue::Nullable) {
                     regressions.push(NullRegression {
+                        file: ctx.file.to_string(),
                         func_node: ctx.func_node,
                         func_name: ctx.func_name.to_string(),
                         consumer_node: consumer.node,
@@ -355,7 +441,7 @@ pub fn analyze_function(func: &NullFunctionFacts) -> Vec<NullRegression> {
     let param_names = collect_param_names(func);
     let entry_env = uniform_env(&param_names, NullabilityValue::Unknown);
     let empty: HashMap<String, &FuncSummary> = HashMap::new();
-    let (regs, _) = analyze_function_full(func, entry_env, &empty);
+    let (regs, _) = analyze_function_full(func, "", entry_env, &empty);
     regs
 }
 
@@ -421,16 +507,28 @@ fn eval_rhs(
         RhsNullability::FromVar(sym) => {
             env.get(sym.as_str()).copied().unwrap_or(NullabilityValue::Unknown)
         }
-        RhsNullability::Call { callee, args } => {
+        RhsNullability::Call { callee, args, receiver } => {
+            if receiver_blocks_resolution(receiver, env) {
+                return NullabilityValue::Unknown;
+            }
             if let Some(summary) = summaries.get(callee.as_str()) {
                 let arg_nulls = resolve_args(args, env);
                 apply_summary(summary, &arg_nulls, regressions)
             } else {
-                // Callee not in file (stdlib, external): Unknown.
+                // Callee not in scope (stdlib, external, ambiguous name): Unknown.
                 NullabilityValue::Unknown
             }
         }
         RhsNullability::Unknown => NullabilityValue::Unknown,
+    }
+}
+
+/// Returns true when the receiver is a known local/param (env-gated), meaning the call is a
+/// method call on a local object and should NOT be resolved as a cross-file module call.
+fn receiver_blocks_resolution(receiver: &Option<String>, env: &HashMap<String, NullabilityValue>) -> bool {
+    match receiver {
+        None => false,
+        Some(name) => env.contains_key(name.as_str()),
     }
 }
 
