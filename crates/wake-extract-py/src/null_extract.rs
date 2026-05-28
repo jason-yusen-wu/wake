@@ -1,8 +1,8 @@
 use tree_sitter::Node;
 use wake_engine::{Db, SourceFile};
 use wake_schema::{
-    Consumer, ConsumerKind, NullDef, NullFact, NullFileFacts, NullFunctionFacts, NullabilityValue,
-    RhsNullability,
+    CallArgKind, Consumer, ConsumerKind, NullCallSite, NullDef, NullFact, NullFileFacts,
+    NullFunctionFacts, NullReturn, NullabilityValue, RhsNullability,
 };
 
 use crate::{node_id, node_text};
@@ -38,6 +38,11 @@ pub fn extract_null_source(src: &[u8]) -> NullFileFacts {
 }
 
 fn extract_null_function(src: &[u8], func_node: Node<'_>) -> NullFunctionFacts {
+    let func_name = func_node
+        .child_by_field_name("name")
+        .map(|n| node_text(src, n).to_string())
+        .unwrap_or_default();
+
     let mut facts: Vec<NullFact> = Vec::new();
 
     let mut cursor = func_node.walk();
@@ -50,7 +55,7 @@ fn extract_null_function(src: &[u8], func_node: Node<'_>) -> NullFunctionFacts {
         }
     }
 
-    NullFunctionFacts { func_node: node_id(func_node), facts }
+    NullFunctionFacts { func_node: node_id(func_node), func_name, facts }
 }
 
 // ── Parameter extraction ──────────────────────────────────────────────────────
@@ -170,6 +175,10 @@ fn extract_null_stmt(src: &[u8], stmt: Node<'_>, facts: &mut Vec<NullFact>) {
                             }
                         }
                     }
+                    "call" => {
+                        // Bare call statement — may be interprocedural.
+                        extract_call_stmt(src, inner, facts);
+                    }
                     _ => collect_consumers(src, inner, facts),
                 }
             }
@@ -177,9 +186,17 @@ fn extract_null_stmt(src: &[u8], stmt: Node<'_>, facts: &mut Vec<NullFact>) {
         "return_statement" => {
             let mut cursor = stmt.walk();
             for child in stmt.children(&mut cursor) {
-                if child.kind() != "return" {
-                    collect_consumers(src, child, facts);
+                if child.kind() == "return" {
+                    continue;
                 }
+                // Consumer sites in the return expression (handles `return x()` where
+                // x is a local Nullable variable — must produce Consumer(x, Call)).
+                collect_consumers(src, child, facts);
+                // Return-value fact for summary computation.
+                facts.push(NullFact::Return(NullReturn {
+                    node: node_id(child),
+                    rhs: classify_rhs(src, child),
+                }));
             }
         }
         // All control-flow constructs are opaque barriers.
@@ -197,21 +214,45 @@ fn extract_null_stmt(src: &[u8], stmt: Node<'_>, facts: &mut Vec<NullFact>) {
     }
 }
 
+/// Emit consumer facts for a bare call statement, plus a `CallStmt` if the
+/// callee is a direct identifier (for interprocedural analysis).
+///
+/// We always call `collect_consumers` so that `x()` where x is a local
+/// variable (potentially None) correctly produces Consumer(x, Call).
+/// The additional `CallStmt` is only for cross-function regression propagation.
+fn extract_call_stmt(src: &[u8], call_node: Node<'_>, facts: &mut Vec<NullFact>) {
+    // Always collect — handles the case where the callee is a local Nullable var.
+    collect_consumers(src, call_node, facts);
+
+    // Also record the interprocedural call site for summary application.
+    if let Some(func) = call_node.child_by_field_name("function") {
+        if func.kind() == "identifier" {
+            facts.push(NullFact::CallStmt(NullCallSite {
+                node: node_id(call_node),
+                callee: node_text(src, func).to_string(),
+                args: extract_call_args(src, call_node),
+            }));
+        }
+    }
+}
+
 fn extract_null_assignment(src: &[u8], assign: Node<'_>, facts: &mut Vec<NullFact>) {
+    let rhs_node = assign.child_by_field_name("right");
+
     // Evaluation order: RHS consumers first, then define LHS.
-    if let Some(rhs_node) = assign.child_by_field_name("right") {
-        collect_consumers(src, rhs_node, facts);
+    // Always use collect_consumers so that `y = x()` where x is a local
+    // Nullable variable produces Consumer(x, Call) — same as other consumer sites.
+    if let Some(rhs) = rhs_node {
+        collect_consumers(src, rhs, facts);
     }
 
     if let Some(lhs) = assign.child_by_field_name("left") {
         if lhs.kind() == "identifier" {
-            // Annotation is present only for `x: T = …` forms.
             let annotation = assign
                 .child_by_field_name("type")
                 .map(|t| parse_annotation_text(node_text(src, t)))
                 .unwrap_or(NullabilityValue::Unknown);
-            let rhs = assign
-                .child_by_field_name("right")
+            let rhs = rhs_node
                 .map(|r| classify_rhs(src, r))
                 .unwrap_or(RhsNullability::Unknown);
             facts.push(NullFact::Assign(NullDef {
@@ -225,6 +266,32 @@ fn extract_null_assignment(src: &[u8], assign: Node<'_>, facts: &mut Vec<NullFac
             collect_consumers(src, lhs, facts);
         }
     }
+}
+
+// ── Call argument helpers ─────────────────────────────────────────────────────
+
+/// Extract argument kinds from a call expression's argument list.
+fn extract_call_args(src: &[u8], call_node: Node<'_>) -> Vec<CallArgKind> {
+    let mut args = Vec::new();
+    let Some(arg_list) = call_node.child_by_field_name("arguments") else {
+        return args;
+    };
+    let mut cursor = arg_list.walk();
+    for child in arg_list.children(&mut cursor) {
+        match child.kind() {
+            // Punctuation and delimiters
+            "," | "(" | ")" => {}
+            "none" => args.push(CallArgKind::NullLiteral),
+            "identifier" => args.push(CallArgKind::Var(node_text(src, child).to_string())),
+            "true" | "false" | "integer" | "float" | "string" | "concatenated_string"
+            | "raw_string_literal" | "bytes" | "list" | "set" | "dictionary" | "tuple" => {
+                args.push(CallArgKind::NonNullLiteral);
+            }
+            // keyword_argument, list_splat, dict_splat, *args, **kwargs → Unknown
+            _ => args.push(CallArgKind::Unknown),
+        }
+    }
+    args
 }
 
 // ── Consumer extraction ───────────────────────────────────────────────────────
@@ -249,7 +316,6 @@ pub fn collect_consumers(src: &[u8], node: Node<'_>, facts: &mut Vec<NullFact>) 
                         object_symbol: node_text(src, obj).to_string(),
                         kind: ConsumerKind::Attribute,
                     }));
-                    // The attribute name is just a name, not a sub-expression.
                 }
                 Some(obj) => collect_consumers(src, obj, facts),
                 None => {}
@@ -320,7 +386,6 @@ pub fn collect_consumers(src: &[u8], node: Node<'_>, facts: &mut Vec<NullFact>) 
 // ── RHS classification ────────────────────────────────────────────────────────
 
 /// Classify the nullability of a right-hand-side expression without running dataflow.
-/// This gives the "static" nullability of the value being assigned.
 fn classify_rhs(src: &[u8], rhs: Node<'_>) -> RhsNullability {
     match rhs.kind() {
         "none" => RhsNullability::Literal(NullabilityValue::Nullable),
@@ -329,8 +394,17 @@ fn classify_rhs(src: &[u8], rhs: Node<'_>) -> RhsNullability {
             RhsNullability::Literal(NullabilityValue::NonNull)
         }
         "identifier" => RhsNullability::FromVar(node_text(src, rhs).to_string()),
-        // Function calls, attribute access, binary ops, etc. — all Unknown for Phase 2.
-        // Phase 3 will propagate summaries across call boundaries.
+        "call" => {
+            // Direct call to a named function → interprocedural tracking.
+            match rhs.child_by_field_name("function") {
+                Some(func) if func.kind() == "identifier" => RhsNullability::Call {
+                    callee: node_text(src, func).to_string(),
+                    args: extract_call_args(src, rhs),
+                },
+                _ => RhsNullability::Unknown,
+            }
+        }
+        // Function calls, attribute access, binary ops, etc. — all Unknown.
         _ => RhsNullability::Unknown,
     }
 }
@@ -338,50 +412,35 @@ fn classify_rhs(src: &[u8], rhs: Node<'_>) -> RhsNullability {
 // ── Type annotation parsing ───────────────────────────────────────────────────
 
 /// Determine the nullability implied by a Python type annotation string.
-///
-/// We parse annotation text rather than the AST to stay simple and handle
-/// all surface forms (Optional[T], T | None, Union[T, None]) in one place.
 pub fn parse_annotation_text(text: &str) -> NullabilityValue {
     let t = text.trim();
 
-    // Direct None annotation.
     if t == "None" {
         return NullabilityValue::Nullable;
     }
-
-    // Optional[T] — most common nullable annotation.
     if t.starts_with("Optional[") || t.starts_with("Optional [") {
         return NullabilityValue::Nullable;
     }
-
-    // Union[T, None] or Union[None, T] — explicit union.
     if t.starts_with("Union[") && t.contains("None") {
         return NullabilityValue::Nullable;
     }
-
-    // T | None or None | T — PEP 604 (Python 3.10+).
     if t.contains("| None") || t.contains("None |") {
         return NullabilityValue::Nullable;
     }
-
-    // Known non-Optional built-in and common library types.
     if is_known_non_nullable(t) {
         return NullabilityValue::NonNull;
     }
 
-    // Any other annotation: we don't have enough information.
     NullabilityValue::Unknown
 }
 
 fn is_known_non_nullable(t: &str) -> bool {
-    // Plain built-in names.
     matches!(
         t,
         "str" | "int" | "float" | "bool" | "bytes" | "bytearray"
             | "list" | "dict" | "set" | "tuple" | "frozenset"
             | "object" | "type" | "complex"
     ) || {
-        // Strip a single layer of List[…], Dict[…], etc. that don't contain None.
         let prefixes = [
             "List[", "Dict[", "Set[", "FrozenSet[", "Tuple[", "Sequence[",
             "Iterable[", "Iterator[", "Generator[", "Callable[", "Type[",

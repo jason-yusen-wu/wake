@@ -96,6 +96,19 @@ impl NullabilityValue {
     }
 }
 
+/// How each argument to a call is classified for interprocedural analysis.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub enum CallArgKind {
+    /// A local variable: `f(x)`
+    Var(String),
+    /// The `None` literal: `f(None)`
+    NullLiteral,
+    /// A non-null literal (str, int, list, …): `f("hi")`, `f(42)`
+    NonNullLiteral,
+    /// Any expression we cannot classify statically
+    Unknown,
+}
+
 /// Nullability classification of the right-hand side of an assignment.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
 pub enum RhsNullability {
@@ -103,7 +116,9 @@ pub enum RhsNullability {
     Literal(NullabilityValue),
     /// Copied from another local: `x = y`
     FromVar(String),
-    /// Anything we cannot classify: binary ops, attribute access, calls, etc.
+    /// Direct call to a named function: `x = f(a, b)`
+    Call { callee: String, args: Vec<CallArgKind> },
+    /// Anything we cannot classify: binary ops, attribute access, method calls, etc.
     Unknown,
 }
 
@@ -137,6 +152,22 @@ pub struct NullDef {
     pub rhs: RhsNullability,
 }
 
+/// A bare call statement (return value discarded or not captured).
+/// Used for interprocedural analysis: `f(x)` as a statement.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub struct NullCallSite {
+    pub node: NodeId,
+    pub callee: String,
+    pub args: Vec<CallArgKind>,
+}
+
+/// A return statement's value, for summary computation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub struct NullReturn {
+    pub node: NodeId,
+    pub rhs: RhsNullability,
+}
+
 /// A single nullability-relevant fact in execution order within a function body.
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub enum NullFact {
@@ -146,6 +177,10 @@ pub enum NullFact {
     Assign(NullDef),
     /// A site that consumes a local variable (attribute access, subscript, call).
     Consumer(Consumer),
+    /// A bare call statement: `f(args)` — interprocedural boundary with no LHS.
+    CallStmt(NullCallSite),
+    /// A return statement: tracks what value flows out of the function.
+    Return(NullReturn),
     /// A control-flow barrier or parse error: clears the entire reaching state.
     Unknown(NodeId),
 }
@@ -154,6 +189,8 @@ pub enum NullFact {
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct NullFunctionFacts {
     pub func_node: NodeId,
+    /// The function's own name (identifier text), for call-graph construction.
+    pub func_name: String,
     pub facts: Vec<NullFact>,
 }
 
