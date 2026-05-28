@@ -81,6 +81,7 @@ fn fake_regression(func_start: u32, consumer_start: u32, symbol: &str) -> Regres
     RegressionReport {
         regression: NullRegression {
             func_node: node(func_start, func_start + 10),
+            func_name: "f".to_string(),
             consumer_node: node(consumer_start, consumer_start + 10),
             object_symbol: symbol.to_string(),
             kind: ConsumerKind::Attribute,

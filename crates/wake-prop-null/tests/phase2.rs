@@ -244,37 +244,42 @@ fn chained_attribute_regression_on_innermost() {
     assert!(has_regression_for(src, "x"));
 }
 
-// ── 14. Control-flow barrier clears state ────────────────────────────────────
+// ── 14. Control-flow join: state after a branch is conservatively Unknown ─────
+// (Branch/loop analysis with guard narrowing has dedicated coverage in
+// tests/control_flow.rs; these assert the post-merge no-false-positive property.)
 
 #[test]
-fn if_barrier_clears_nullable() {
-    // After if, x is Unknown (barrier cleared env) — no regression on subsequent use.
+fn use_after_if_is_not_a_false_positive() {
+    // `if x: pass` narrows x to NonNull on the true side; the merge with the
+    // (still-Nullable) fall-through is Unknown, so the later use does not fire.
     let src = "def f(x: Optional[str]):\n    if x:\n        pass\n    return x.upper()\n";
     assert_eq!(
         count_regressions(src),
         0,
-        "barrier after Optional param clears state; use after barrier is Unknown, not Nullable"
+        "post-branch merge is Unknown, not Nullable — no false positive"
     );
 }
 
 #[test]
-fn for_barrier_clears_state() {
+fn use_after_for_over_optional_is_not_a_false_positive() {
+    // Iterating x proves it non-None, so the later subscript is not reachable
+    // with x == None — must not be reported.
     let src = "def f(x: Optional[list]):\n    for i in x:\n        pass\n    return x[0]\n";
-    assert_eq!(count_regressions(src), 0, "for barrier clears nullable x");
+    assert_eq!(count_regressions(src), 0, "for-loop over x narrows it; no false positive");
 }
 
 #[test]
-fn while_barrier_clears_state() {
+fn use_after_while_guard_is_not_a_false_positive() {
     let src = "def f(x: Optional[object]):\n    while x:\n        pass\n    return x()\n";
-    assert_eq!(count_regressions(src), 0, "while barrier clears nullable x");
+    assert_eq!(count_regressions(src), 0, "while-guard narrows x; post-merge Unknown");
 }
 
-// ── 15. Consumer before barrier fires, consumer after barrier does not ────────
+// ── 15. Consumer before a branch still fires ──────────────────────────────────
 
 #[test]
-fn consumer_before_barrier_fires() {
+fn consumer_before_branch_fires() {
     let src = "def f(x: Optional[str]):\n    y = x.upper()\n    if y:\n        pass\n    return y\n";
-    // x.upper() before the if barrier → regression on x
+    // x.upper() before the branch → straight-line regression on x.
     assert_eq!(count_regressions(src), 1);
     assert!(has_regression_for(src, "x"));
 }

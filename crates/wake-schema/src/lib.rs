@@ -123,7 +123,7 @@ pub enum RhsNullability {
 }
 
 /// Kind of a consumer site — a place where a None value would cause a runtime error.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::Update)]
 pub enum ConsumerKind {
     Attribute, // x.attr  — AttributeError if x is None
     Subscript, // x[i]   — TypeError if x is None
@@ -168,6 +168,69 @@ pub struct NullReturn {
     pub rhs: RhsNullability,
 }
 
+/// How a branch condition refines a single symbol's nullability on each side.
+/// Language-neutral: the extractor maps Python syntax (`x is None`, `if x:`)
+/// onto these effects; the solver applies them without knowing about Python.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub enum NarrowEffect {
+    /// Leave the symbol's nullability unchanged on this side.
+    Keep,
+    /// The symbol is known NonNull on this side.
+    NonNull,
+    /// The symbol can be None on this side.
+    Nullable,
+    /// We cannot say — set Unknown on this side (precision-safe).
+    Unknown,
+}
+
+/// The nullability effect of a branch/loop condition.
+///
+/// `symbol` is the single variable the condition refines precisely (if any).
+/// `opaque_refs` are other variables the condition mentions in a way we cannot
+/// interpret; they are set Unknown on the guarded side(s) so an unmodeled guard
+/// never produces a false positive.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub struct BranchCondition {
+    pub symbol: Option<String>,
+    pub on_true: NarrowEffect,
+    pub on_false: NarrowEffect,
+    pub opaque_refs: Vec<String>,
+}
+
+impl BranchCondition {
+    /// A condition that refines nothing (touches no tracked symbol meaningfully).
+    pub fn other() -> Self {
+        BranchCondition {
+            symbol: None,
+            on_true: NarrowEffect::Keep,
+            on_false: NarrowEffect::Keep,
+            opaque_refs: Vec::new(),
+        }
+    }
+}
+
+/// A two-way branch (`if`/`elif`/`else`). `else_arm` is empty when there is no
+/// `else`; the false-side narrowing still applies to the implicit fall-through.
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct NullBranch {
+    pub node: NodeId,
+    pub condition: BranchCondition,
+    pub then_arm: Vec<NullFact>,
+    pub else_arm: Vec<NullFact>,
+}
+
+/// A loop (`for`/`while`). The body may run zero or more times.
+/// `condition` narrows the body entry (the truthy side); `for`-loops use
+/// `BranchCondition::other()`. `bound` names (e.g. the `for` target) are
+/// Unknown inside the body.
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct NullLoop {
+    pub node: NodeId,
+    pub condition: BranchCondition,
+    pub bound: Vec<String>,
+    pub body: Vec<NullFact>,
+}
+
 /// A single nullability-relevant fact in execution order within a function body.
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub enum NullFact {
@@ -181,7 +244,16 @@ pub enum NullFact {
     CallStmt(NullCallSite),
     /// A return statement: tracks what value flows out of the function.
     Return(NullReturn),
+    /// A conditional with per-arm narrowing.
+    Branch(NullBranch),
+    /// A loop body that may run zero or more times.
+    Loop(NullLoop),
+    /// An unconditional narrowing: `assert COND` — the false path raises, so the
+    /// condition's true-side narrowing holds for all following code.
+    Assume(BranchCondition),
     /// A control-flow barrier or parse error: clears the entire reaching state.
+    /// Reserved for unparseable regions and not-yet-modeled constructs
+    /// (`try`/`with`/`match`).
     Unknown(NodeId),
 }
 
@@ -203,7 +275,12 @@ pub struct NullFileFacts {
 /// A confirmed potential None-dereference: the consumer variable is Nullable at this site.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
 pub struct NullRegression {
+    /// Node of the function that *contains* the consumer (the callee, for
+    /// interprocedural regressions surfaced at a call site).
     pub func_node: NodeId,
+    /// Name of the containing function — a position-independent identity used
+    /// for stable differential diffing across edits that shift byte offsets.
+    pub func_name: String,
     pub consumer_node: NodeId,
     pub object_symbol: String,
     pub kind: ConsumerKind,

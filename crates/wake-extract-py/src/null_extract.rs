@@ -1,8 +1,9 @@
 use tree_sitter::Node;
 use wake_engine::{Db, SourceFile};
 use wake_schema::{
-    CallArgKind, Consumer, ConsumerKind, NullCallSite, NullDef, NullFact, NullFileFacts,
-    NullFunctionFacts, NullReturn, NullabilityValue, RhsNullability,
+    BranchCondition, CallArgKind, Consumer, ConsumerKind, NarrowEffect, NullBranch, NullCallSite,
+    NullDef, NullFact, NullFileFacts, NullFunctionFacts, NullLoop, NullReturn, NullabilityValue,
+    RhsNullability,
 };
 
 use crate::{node_id, node_text};
@@ -199,13 +200,19 @@ fn extract_null_stmt(src: &[u8], stmt: Node<'_>, facts: &mut Vec<NullFact>) {
                 }));
             }
         }
-        // All control-flow constructs are opaque barriers.
-        "if_statement"
-        | "for_statement"
-        | "while_statement"
-        | "try_statement"
-        | "with_statement"
-        | "match_statement" => {
+        "if_statement" => extract_if_statement(src, stmt, facts),
+        "while_statement" => extract_while_statement(src, stmt, facts),
+        "for_statement" => extract_for_statement(src, stmt, facts),
+        "assert_statement" => {
+            // `assert COND[, msg]` — COND holds for all subsequent code.
+            if let Some(cond) = stmt.named_child(0) {
+                collect_consumers(src, cond, facts);
+                facts.push(NullFact::Assume(extract_condition(src, cond)));
+            }
+        }
+        // Not yet modeled — opaque barrier (precision-safe: clears reaching state,
+        // so consumers inside are simply not analyzed; never a false positive).
+        "try_statement" | "with_statement" | "match_statement" => {
             facts.push(NullFact::Unknown(node_id(stmt)));
         }
         "ERROR" => facts.push(NullFact::Unknown(node_id(stmt))),
@@ -264,6 +271,262 @@ fn extract_null_assignment(src: &[u8], assign: Node<'_>, facts: &mut Vec<NullFac
         } else {
             // Non-identifier LHS (x.attr = …, x[i] = …): the LHS itself may be a consumer.
             collect_consumers(src, lhs, facts);
+        }
+    }
+}
+
+// ── Control-flow extraction ───────────────────────────────────────────────────
+
+/// Extract the facts of a block (the body of an `if`/`while`/`for`) as a list.
+fn extract_block_facts(src: &[u8], block: Node<'_>) -> Vec<NullFact> {
+    let mut facts = Vec::new();
+    let mut cursor = block.walk();
+    for stmt in block.children(&mut cursor) {
+        extract_null_stmt(src, stmt, &mut facts);
+    }
+    facts
+}
+
+/// Find the body `block` of a compound statement / clause, robust to field-name
+/// differences across grammar versions.
+fn block_child<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    node.child_by_field_name("consequence")
+        .or_else(|| node.child_by_field_name("body"))
+        .or_else(|| {
+            let mut cursor = node.walk();
+            node.children(&mut cursor).find(|n| n.kind() == "block")
+        })
+}
+
+fn extract_if_statement(src: &[u8], stmt: Node<'_>, facts: &mut Vec<NullFact>) {
+    let cond = stmt.child_by_field_name("condition");
+    // The condition is evaluated before either arm — its consumers belong in the
+    // parent stream (analyzed with the pre-branch environment).
+    if let Some(c) = cond {
+        collect_consumers(src, c, facts);
+    }
+    let condition = cond
+        .map(|c| extract_condition(src, c))
+        .unwrap_or_else(BranchCondition::other);
+
+    let then_arm = block_child(stmt).map(|b| extract_block_facts(src, b)).unwrap_or_default();
+
+    let mut alternatives = Vec::new();
+    let mut cursor = stmt.walk();
+    for child in stmt.children(&mut cursor) {
+        if matches!(child.kind(), "elif_clause" | "else_clause") {
+            alternatives.push(child);
+        }
+    }
+    let else_arm = build_else_chain(src, &alternatives);
+
+    facts.push(NullFact::Branch(NullBranch {
+        node: node_id(stmt),
+        condition,
+        then_arm,
+        else_arm,
+    }));
+}
+
+/// Build the else-arm fact list from a chain of `elif`/`else` clauses.
+/// Each `elif` becomes a nested `Branch`; the terminal `else` becomes a body.
+fn build_else_chain(src: &[u8], alts: &[Node<'_>]) -> Vec<NullFact> {
+    let Some((first, rest)) = alts.split_first() else {
+        return Vec::new();
+    };
+    match first.kind() {
+        "else_clause" => {
+            block_child(*first).map(|b| extract_block_facts(src, b)).unwrap_or_default()
+        }
+        "elif_clause" => {
+            let mut arm = Vec::new();
+            let cond = first.child_by_field_name("condition");
+            if let Some(c) = cond {
+                collect_consumers(src, c, &mut arm);
+            }
+            let condition = cond
+                .map(|c| extract_condition(src, c))
+                .unwrap_or_else(BranchCondition::other);
+            let then_arm =
+                block_child(*first).map(|b| extract_block_facts(src, b)).unwrap_or_default();
+            let else_arm = build_else_chain(src, rest);
+            arm.push(NullFact::Branch(NullBranch {
+                node: node_id(*first),
+                condition,
+                then_arm,
+                else_arm,
+            }));
+            arm
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn extract_while_statement(src: &[u8], stmt: Node<'_>, facts: &mut Vec<NullFact>) {
+    let cond = stmt.child_by_field_name("condition");
+    if let Some(c) = cond {
+        collect_consumers(src, c, facts);
+    }
+    let condition = cond
+        .map(|c| extract_condition(src, c))
+        .unwrap_or_else(BranchCondition::other);
+    let body = block_child(stmt).map(|b| extract_block_facts(src, b)).unwrap_or_default();
+    facts.push(NullFact::Loop(NullLoop {
+        node: node_id(stmt),
+        condition,
+        bound: Vec::new(),
+        body,
+    }));
+}
+
+fn extract_for_statement(src: &[u8], stmt: Node<'_>, facts: &mut Vec<NullFact>) {
+    // The iterable is evaluated before the loop — its consumers go in the parent.
+    let iterable = stmt.child_by_field_name("right");
+    if let Some(it) = iterable {
+        collect_consumers(src, it, facts);
+    }
+    // Iterating `None` raises TypeError, so a plain-variable iterable is provably
+    // non-None inside (and after) the loop body. Narrow it to avoid a false
+    // positive on a later use that is in fact unreachable when the iterable is None.
+    let condition = match iterable {
+        Some(it) if it.kind() == "identifier" => BranchCondition {
+            symbol: Some(node_text(src, it).to_string()),
+            on_true: NarrowEffect::NonNull,
+            on_false: NarrowEffect::Keep,
+            opaque_refs: Vec::new(),
+        },
+        _ => BranchCondition::other(),
+    };
+    let mut bound = Vec::new();
+    if let Some(target) = stmt.child_by_field_name("left") {
+        collect_identifiers(src, target, &mut bound);
+    }
+    let body = block_child(stmt).map(|b| extract_block_facts(src, b)).unwrap_or_default();
+    facts.push(NullFact::Loop(NullLoop {
+        node: node_id(stmt),
+        condition,
+        bound,
+        body,
+    }));
+}
+
+/// Map a Python condition expression onto its language-neutral narrowing effect.
+fn extract_condition(src: &[u8], cond: Node<'_>) -> BranchCondition {
+    match cond.kind() {
+        // `if x:` — truthy ⇒ NonNull; falsy side tells us nothing definite.
+        "identifier" => BranchCondition {
+            symbol: Some(node_text(src, cond).to_string()),
+            on_true: NarrowEffect::NonNull,
+            on_false: NarrowEffect::Keep,
+            opaque_refs: Vec::new(),
+        },
+        "parenthesized_expression" => cond
+            .named_child(0)
+            .map(|inner| extract_condition(src, inner))
+            .unwrap_or_else(BranchCondition::other),
+        "not_operator" => match cond.child_by_field_name("argument") {
+            // `if not x:` — true side is falsy (not necessarily None), false side NonNull.
+            Some(a) if a.kind() == "identifier" => BranchCondition {
+                symbol: Some(node_text(src, a).to_string()),
+                on_true: NarrowEffect::Unknown,
+                on_false: NarrowEffect::NonNull,
+                opaque_refs: Vec::new(),
+            },
+            _ => opaque_condition(src, cond),
+        },
+        "comparison_operator" => parse_none_comparison(src, cond),
+        _ => opaque_condition(src, cond),
+    }
+}
+
+/// A condition we cannot interpret: every variable it references is set Unknown
+/// on both sides so an unmodeled guard never yields a false positive.
+fn opaque_condition(src: &[u8], cond: Node<'_>) -> BranchCondition {
+    let mut refs = Vec::new();
+    collect_identifiers(src, cond, &mut refs);
+    BranchCondition {
+        symbol: None,
+        on_true: NarrowEffect::Keep,
+        on_false: NarrowEffect::Keep,
+        opaque_refs: refs,
+    }
+}
+
+/// Recognize `x is None`, `x is not None`, `x == None`, `x != None` (either order).
+/// tree-sitter-python tokenizes `is not` as a single anonymous `"is not"` token.
+fn parse_none_comparison(src: &[u8], cond: Node<'_>) -> BranchCondition {
+    let mut ident: Option<String> = None;
+    let mut has_none = false;
+    let mut op: Option<&str> = None;
+    let mut other_operand = false;
+
+    let mut cursor = cond.walk();
+    for child in cond.children(&mut cursor) {
+        match child.kind() {
+            "identifier" => {
+                if ident.is_none() {
+                    ident = Some(node_text(src, child).to_string());
+                } else {
+                    other_operand = true;
+                }
+            }
+            "none" => has_none = true,
+            "is" | "is not" | "==" | "!=" => op = Some(child.kind()),
+            // Any other named operand (literal, call, attribute, second comparison)
+            // means this is not a simple `<var> <op> None` test.
+            other => {
+                if child.is_named() && other != "comment" {
+                    other_operand = true;
+                }
+            }
+        }
+    }
+
+    if other_operand || !has_none {
+        return opaque_condition(src, cond);
+    }
+    let (Some(sym), Some(o)) = (ident, op) else {
+        return opaque_condition(src, cond);
+    };
+
+    // Does the test evaluate true when the variable *is* None?
+    let true_when_none = match o {
+        "is" | "==" => true,
+        "is not" | "!=" => false,
+        _ => return opaque_condition(src, cond),
+    };
+    if true_when_none {
+        BranchCondition {
+            symbol: Some(sym),
+            on_true: NarrowEffect::Nullable,
+            on_false: NarrowEffect::NonNull,
+            opaque_refs: Vec::new(),
+        }
+    } else {
+        BranchCondition {
+            symbol: Some(sym),
+            on_true: NarrowEffect::NonNull,
+            on_false: NarrowEffect::Nullable,
+            opaque_refs: Vec::new(),
+        }
+    }
+}
+
+/// Collect local-variable identifier names referenced in an expression
+/// (the object of an attribute access, not the attribute name).
+fn collect_identifiers(src: &[u8], node: Node<'_>, out: &mut Vec<String>) {
+    match node.kind() {
+        "identifier" => out.push(node_text(src, node).to_string()),
+        "attribute" => {
+            if let Some(obj) = node.child_by_field_name("object") {
+                collect_identifiers(src, obj, out);
+            }
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_identifiers(src, child, out);
+            }
         }
     }
 }
@@ -412,19 +675,24 @@ fn classify_rhs(src: &[u8], rhs: Node<'_>) -> RhsNullability {
 // ── Type annotation parsing ───────────────────────────────────────────────────
 
 /// Determine the nullability implied by a Python type annotation string.
+///
+/// Token-aware: a type whose *name* merely contains the substring "None"
+/// (e.g. `NoneCheck`, `MyNoneType`) is not treated as nullable. We look for
+/// `None`/`NoneType` as standalone identifier tokens.
 pub fn parse_annotation_text(text: &str) -> NullabilityValue {
     let t = text.trim();
 
-    if t == "None" {
+    // The bare None type (and its runtime spelling NoneType).
+    if t == "None" || t == "NoneType" {
         return NullabilityValue::Nullable;
     }
-    if t.starts_with("Optional[") || t.starts_with("Optional [") {
+    // `Optional[...]` is `Union[..., None]` — always nullable.
+    if head_name(t) == "Optional" && t.contains('[') {
         return NullabilityValue::Nullable;
     }
-    if t.starts_with("Union[") && t.contains("None") {
-        return NullabilityValue::Nullable;
-    }
-    if t.contains("| None") || t.contains("None |") {
+    // `Union[..., None, ...]` or a PEP 604 `X | None` union that includes None.
+    let is_union = (head_name(t) == "Union" && t.contains('[')) || t.contains('|');
+    if is_union && mentions_none_token(t) {
         return NullabilityValue::Nullable;
     }
     if is_known_non_nullable(t) {
@@ -432,6 +700,37 @@ pub fn parse_annotation_text(text: &str) -> NullabilityValue {
     }
 
     NullabilityValue::Unknown
+}
+
+/// The unqualified head of an annotation: the identifier before the first
+/// subscript/union, stripped of any module qualifier (`typing.Optional` →
+/// `Optional`).
+fn head_name(t: &str) -> &str {
+    let head = t.split(['[', '|']).next().unwrap_or(t).trim();
+    head.rsplit('.').next().unwrap_or(head)
+}
+
+/// True if `None` or `NoneType` appears as a standalone identifier token.
+fn mentions_none_token(t: &str) -> bool {
+    let bytes = t.as_bytes();
+    let is_ident = |b: u8| b == b'_' || b.is_ascii_alphanumeric();
+    let mut start = 0;
+    while start < bytes.len() {
+        if !is_ident(bytes[start]) {
+            start += 1;
+            continue;
+        }
+        let mut end = start;
+        while end < bytes.len() && is_ident(bytes[end]) {
+            end += 1;
+        }
+        let tok = &t[start..end];
+        if tok == "None" || tok == "NoneType" {
+            return true;
+        }
+        start = end;
+    }
+    false
 }
 
 fn is_known_non_nullable(t: &str) -> bool {
@@ -446,6 +745,9 @@ fn is_known_non_nullable(t: &str) -> bool {
             "Iterable[", "Iterator[", "Generator[", "Callable[", "Type[",
             "Deque[", "DefaultDict[", "Counter[", "ChainMap[",
         ];
-        prefixes.iter().any(|p| t.starts_with(p)) && !t.contains("None")
+        // A container/callable value is itself non-None regardless of its element
+        // types, but we keep the original conservative stance and only assert
+        // NonNull when None is not mentioned as a standalone token.
+        prefixes.iter().any(|p| t.starts_with(p)) && !mentions_none_token(t)
     }
 }

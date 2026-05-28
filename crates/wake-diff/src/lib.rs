@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use wake_engine::{Db, SourceFile};
 use wake_schema::{
     CallArgKind, ConsumerKind, NodeId, NullFact, NullFileFacts, NullFunctionFacts, NullReturn,
@@ -61,9 +61,12 @@ pub fn regressions_with_witnesses(db: &dyn Db, file: SourceFile) -> Vec<Regressi
         summaries.entries.iter().map(|(n, s)| (n.clone(), s)).collect();
 
     let mut reports = Vec::new();
-    for (func_node, regs) in &regressions {
-        let func = file_facts.functions.iter().find(|f| &f.func_node == func_node);
+    for (_bucket, regs) in &regressions {
         for reg in regs {
+            // Locate the function that *contains* the consumer via the
+            // regression's own `func_node` (the callee for interprocedural
+            // regressions), so cross-function derefs get a real witness.
+            let func = file_facts.functions.iter().find(|f| f.func_node == reg.func_node);
             let witness = func
                 .map(|f| compute_witness(f, reg, &file_facts, &summary_map))
                 .unwrap_or_default();
@@ -75,31 +78,80 @@ pub fn regressions_with_witnesses(db: &dyn Db, file: SourceFile) -> Vec<Regressi
 
 // ── Pure functions ────────────────────────────────────────────────────────────
 
+/// Position-independent identity of a regression: which function, which
+/// variable, which kind of dereference, and which occurrence among siblings.
+/// Deliberately excludes raw byte offsets so that an edit which merely shifts
+/// text (a comment, an unrelated line) does not make an unchanged regression
+/// look new or fixed.
+type DiffKey = (String, String, ConsumerKind, usize);
+
+/// Assign a stable `DiffKey` to each report. The occurrence ordinal is taken
+/// from the relative byte order of consumers sharing the same
+/// (function, symbol, kind), which is invariant under offset-only edits.
+fn keyed(reports: &[RegressionReport]) -> HashMap<DiffKey, &RegressionReport> {
+    let mut order: Vec<usize> = (0..reports.len()).collect();
+    order.sort_by(|&i, &j| {
+        let a = &reports[i].regression;
+        let b = &reports[j].regression;
+        a.func_name
+            .cmp(&b.func_name)
+            .then_with(|| a.object_symbol.cmp(&b.object_symbol))
+            .then_with(|| a.kind.cmp(&b.kind))
+            .then_with(|| a.consumer_node.start_byte.cmp(&b.consumer_node.start_byte))
+            .then_with(|| a.consumer_node.end_byte.cmp(&b.consumer_node.end_byte))
+    });
+
+    let mut map = HashMap::new();
+    let mut ordinal = 0usize;
+    let mut prev: Option<(&str, &str, ConsumerKind)> = None;
+    for &i in &order {
+        let r = &reports[i].regression;
+        let group = (r.func_name.as_str(), r.object_symbol.as_str(), r.kind);
+        if prev == Some(group) {
+            ordinal += 1;
+        } else {
+            ordinal = 0;
+            prev = Some(group);
+        }
+        let key = (r.func_name.clone(), r.object_symbol.clone(), r.kind, ordinal);
+        map.insert(key, &reports[i]);
+    }
+    map
+}
+
 /// Diff two snapshots of regression reports.
 ///
-/// `before` and `after` are the results before and after an edit.
-/// Returns the blast radius (changed consumer nodes), newly appearing regressions,
-/// and regressions that disappeared.
+/// `before` and `after` are the results before and after an edit. Returns the
+/// blast radius (consumer nodes whose Nullable status changed), newly appearing
+/// regressions, and regressions that disappeared. Comparison is by position-
+/// independent `DiffKey`, so benign offset-shifting edits produce an empty diff.
 pub fn diff_results(before: &[RegressionReport], after: &[RegressionReport]) -> DiffResult {
-    let before_nodes: HashSet<NodeId> =
-        before.iter().map(|r| r.regression.consumer_node).collect();
-    let after_nodes: HashSet<NodeId> = after.iter().map(|r| r.regression.consumer_node).collect();
+    let before_keyed = keyed(before);
+    let after_keyed = keyed(after);
 
-    let mut blast_radius: Vec<NodeId> =
-        before_nodes.symmetric_difference(&after_nodes).copied().collect();
+    let mut new_regressions: Vec<RegressionReport> = after_keyed
+        .iter()
+        .filter(|(k, _)| !before_keyed.contains_key(*k))
+        .map(|(_, r)| (*r).clone())
+        .collect();
+
+    let mut fixed_regressions: Vec<NullRegression> = before_keyed
+        .iter()
+        .filter(|(k, _)| !after_keyed.contains_key(*k))
+        .map(|(_, r)| r.regression.clone())
+        .collect();
+
+    let mut blast_radius: Vec<NodeId> = new_regressions
+        .iter()
+        .map(|r| r.regression.consumer_node)
+        .chain(fixed_regressions.iter().map(|r| r.consumer_node))
+        .collect();
     blast_radius.sort();
+    blast_radius.dedup();
 
-    let new_regressions: Vec<RegressionReport> = after
-        .iter()
-        .filter(|r| !before_nodes.contains(&r.regression.consumer_node))
-        .cloned()
-        .collect();
-
-    let fixed_regressions: Vec<NullRegression> = before
-        .iter()
-        .filter(|r| !after_nodes.contains(&r.regression.consumer_node))
-        .map(|r| r.regression.clone())
-        .collect();
+    // Deterministic output ordering.
+    new_regressions.sort_by_key(|r| (r.regression.consumer_node.start_byte, r.regression.consumer_node.end_byte));
+    fixed_regressions.sort_by_key(|r| (r.consumer_node.start_byte, r.consumer_node.end_byte));
 
     DiffResult { blast_radius, new_regressions, fixed_regressions }
 }
@@ -114,7 +166,10 @@ pub fn compute_witness(
     file_facts: &NullFileFacts,
     summaries: &HashMap<String, &FuncSummary>,
 ) -> Vec<WitnessStep> {
-    let consumer_idx = func.facts.iter().position(|f| {
+    // Flatten branch arms / loop bodies into execution order so consumers
+    // nested inside control flow are reachable by the linear backward trace.
+    let flat = flatten(&func.facts);
+    let consumer_idx = flat.iter().position(|f| {
         matches!(f, NullFact::Consumer(c) if c.node == regression.consumer_node)
     });
 
@@ -123,7 +178,7 @@ pub fn compute_witness(
     };
 
     let mut steps = trace_backward(
-        &func.facts,
+        &flat,
         &regression.object_symbol,
         consumer_idx,
         file_facts,
@@ -141,6 +196,27 @@ pub fn compute_witness(
 }
 
 // ── Witness internals ─────────────────────────────────────────────────────────
+
+/// Flatten structured facts (branch arms, loop bodies) into a single
+/// execution-order list of leaf facts for linear witness tracing.
+fn flatten(facts: &[NullFact]) -> Vec<NullFact> {
+    let mut out = Vec::new();
+    flatten_into(facts, &mut out);
+    out
+}
+
+fn flatten_into(facts: &[NullFact], out: &mut Vec<NullFact>) {
+    for f in facts {
+        match f {
+            NullFact::Branch(b) => {
+                flatten_into(&b.then_arm, out);
+                flatten_into(&b.else_arm, out);
+            }
+            NullFact::Loop(l) => flatten_into(&l.body, out),
+            other => out.push(other.clone()),
+        }
+    }
+}
 
 /// Trace backward through `facts` to explain why `symbol` is Nullable at `before_idx`.
 ///
@@ -277,14 +353,14 @@ fn trace_callee_return(
     summaries: &HashMap<String, &FuncSummary>,
     depth: usize,
 ) -> Vec<WitnessStep> {
-    let return_facts: Vec<(usize, &NullReturn)> = callee_func
-        .facts
+    let flat = flatten(&callee_func.facts);
+    let return_facts: Vec<(usize, NullReturn)> = flat
         .iter()
         .enumerate()
-        .filter_map(|(i, f)| if let NullFact::Return(r) = f { Some((i, r)) } else { None })
+        .filter_map(|(i, f)| if let NullFact::Return(r) = f { Some((i, r.clone())) } else { None })
         .collect();
 
-    for (pos, ret) in return_facts {
+    for (pos, ret) in &return_facts {
         match &ret.rhs {
             RhsNullability::Literal(NullabilityValue::Nullable) => {
                 return vec![WitnessStep::NoneAssignment {
@@ -293,23 +369,14 @@ fn trace_callee_return(
                 }];
             }
             RhsNullability::FromVar(sym) => {
-                return trace_backward(
-                    &callee_func.facts,
-                    sym,
-                    pos,
-                    file_facts,
-                    summaries,
-                    depth,
-                );
+                return trace_backward(&flat, sym, *pos, file_facts, summaries, depth);
             }
             RhsNullability::Call { callee, args } => {
-                let callee = callee.clone();
-                let args = args.clone();
                 return explain_call_nullable(
-                    &callee,
-                    &args,
-                    &callee_func.facts,
-                    pos,
+                    callee,
+                    args,
+                    &flat,
+                    *pos,
                     file_facts,
                     summaries,
                     depth,
