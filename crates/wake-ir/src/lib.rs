@@ -1,9 +1,66 @@
 use std::collections::HashMap;
 use wake_engine::{Db, SourceFile};
-use wake_schema::{Confidence, Def, DefUseEdge, Fact, FunctionFacts, NodeId, Use};
+use wake_schema::{
+    CallEdge, Confidence, Def, DefUseEdge, Fact, FunctionFacts, NodeId, NullFact, RhsNullability,
+    Use,
+};
 
 /// Def-use edges computed for every function in a file.
 pub type FunctionEdges = Vec<(NodeId, Vec<DefUseEdge>)>;
+
+/// Call edges extracted from all functions in a file.
+///
+/// Derived from the nullability fact stream: every `NullFact::CallStmt` and
+/// every `RhsNullability::Call` contributes a `CallEdge`. Confidence is Definite
+/// for statically-resolved names and Unknown for dynamic/unresolved sites.
+/// This is the relational call-graph view the engine uses for demand-driven
+/// interprocedural queries.
+#[salsa::tracked]
+pub fn call_edges(db: &dyn Db, file: SourceFile) -> Vec<CallEdge> {
+    let file_facts = wake_extract_py::extract_null_file(db, file);
+    let mut edges: Vec<CallEdge> = Vec::new();
+
+    for func in &file_facts.functions {
+        collect_call_edges_from_facts(&func.facts, &mut edges);
+    }
+
+    edges.sort_by(|a, b| {
+        a.call_site.start_byte
+            .cmp(&b.call_site.start_byte)
+            .then_with(|| a.call_site.end_byte.cmp(&b.call_site.end_byte))
+    });
+    edges.dedup();
+    edges
+}
+
+fn collect_call_edges_from_facts(facts: &[NullFact], edges: &mut Vec<CallEdge>) {
+    for fact in facts {
+        match fact {
+            NullFact::Assign(def) => {
+                if let RhsNullability::Call { callee, receiver: None, .. } = &def.rhs {
+                    edges.push(CallEdge {
+                        call_site: def.node,
+                        callee: callee.clone(),
+                        confidence: Confidence::Definite,
+                    });
+                }
+            }
+            NullFact::CallStmt(call) if call.receiver.is_none() => {
+                edges.push(CallEdge {
+                    call_site: call.node,
+                    callee: call.callee.clone(),
+                    confidence: Confidence::Definite,
+                });
+            }
+            NullFact::Branch(br) => {
+                collect_call_edges_from_facts(&br.then_arm, edges);
+                collect_call_edges_from_facts(&br.else_arm, edges);
+            }
+            NullFact::Loop(lp) => collect_call_edges_from_facts(&lp.body, edges),
+            _ => {}
+        }
+    }
+}
 
 /// Compute intraprocedural def-use edges for all functions in `file`.
 ///

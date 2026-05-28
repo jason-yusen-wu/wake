@@ -14,3 +14,4 @@ salsa = "0.26"
 wake-engine = { path = "../wake-engine" }
 wake-extract-py = { path = "../wake-extract-py" }
 wake-schema = { path = "../wake-schema" }
+proptest = "1"

@@ -489,6 +489,11 @@ fn handle_call_stmt(
     summaries: &HashMap<String, &FuncSummary>,
     regressions: &mut Vec<NullRegression>,
 ) {
+    // If the receiver is a known local/param, this is a method call on a local
+    // object — do NOT resolve it as a workspace function (same guard as eval_rhs).
+    if receiver_blocks_resolution(&call.receiver, env) {
+        return;
+    }
     if let Some(summary) = summaries.get(call.callee.as_str()) {
         let arg_nulls = resolve_args(&call.args, env);
         apply_summary(summary, &arg_nulls, regressions);

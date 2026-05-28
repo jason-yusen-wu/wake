@@ -78,6 +78,123 @@ pub struct FileFacts {
 
 // ── Nullability property types ────────────────────────────────────────────────
 
+// ── Relational schema types ───────────────────────────────────────────────────
+// These are the stable compatibility contract between extractors (M side) and
+// the engine (N side). Extractors populate them; the engine queries them.
+// Language-neutral: no Python-specific concepts appear here.
+
+/// Intra-procedural control-flow edge kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub enum CfgEdgeKind {
+    /// Unconditional sequential flow (statement → next statement).
+    Seq,
+    /// The true/taken branch of a conditional.
+    TrueBranch,
+    /// The false/not-taken branch of a conditional.
+    FalseBranch,
+    /// Back-edge from a loop body exit to the loop header.
+    LoopBack,
+    /// Exceptional edge (raise, error node boundary).
+    Exception,
+}
+
+/// One intra-procedural control-flow edge within a function.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub struct CfgEdge {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub kind: CfgEdgeKind,
+}
+
+/// An inter-procedural call edge from a call site to a resolved callee name.
+///
+/// `confidence` is `Unknown` for unresolved dynamic dispatch sites. The engine
+/// treats Unknown-confidence edges conservatively (decline to assert), never
+/// unsoundly.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub struct CallEdge {
+    pub call_site: NodeId,
+    pub callee: String,
+    pub confidence: Confidence,
+}
+
+/// The source of a type fact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub enum TypeSource {
+    /// Explicit PEP 484 / PEP 526 annotation.
+    Annotation,
+    /// Inferred by the extractor (e.g., from a literal RHS).
+    Inferred,
+    /// Unknown — the extractor could not determine the type.
+    Unknown,
+}
+
+/// A type fact binding a node to a type string.
+///
+/// `ty` is an extractor-best-effort string (e.g., `"Optional[str]"`, `"int"`).
+/// The engine uses the presence of `Optional` / `None` in `ty` as a signal;
+/// unrecognised strings are treated as Unknown.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub struct TypeFact {
+    pub node: NodeId,
+    pub ty: String,
+    pub source: TypeSource,
+}
+
+/// The role of a node in the value-flow graph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub enum VfnRole {
+    /// A source of a tainted / Nullable value.
+    Source,
+    /// A site that consumes the value (potential dereference / sink).
+    Consumer,
+    /// A transfer node: value flows through (assignment, return, call arg).
+    Transfer,
+}
+
+/// A node classified by its role in the value-flow graph.
+/// Used by the property-agnostic engine to build the exploded supergraph.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub struct ValueFlowNode {
+    pub node: NodeId,
+    pub role: VfnRole,
+}
+
+// ── Lattice trait ─────────────────────────────────────────────────────────────
+
+/// The minimal interface a property lattice must expose to the engine.
+///
+/// This is the seam between the property-agnostic engine (N side) and each
+/// property lattice (wake-prop-null, future taint crate, etc.). The engine
+/// works over `L: LatticeDomain`; individual lattice crates provide the
+/// concrete types and transfer functions.
+///
+/// Invariants the implementor must uphold:
+/// - Commutativity:  `a.join(b) == b.join(a)`
+/// - Idempotency:    `a.join(a) == a`
+/// - Associativity:  `(a.join(b)).join(c) == a.join(b.join(c))`
+/// - Bottom:         `L::bottom().join(x) == x.join(L::bottom())`  (bottom is the identity for join in a typical lattice)
+///
+/// Note: `NullabilityValue` uses Unknown as bottom (least informative value),
+/// which satisfies the join identity only in the imprecision direction — joining
+/// Unknown with anything yields Unknown, not the other value. This is a deliberate
+/// precision-over-soundness choice; the trait is satisfied regardless.
+pub trait LatticeDomain: Clone + PartialEq + Eq + std::fmt::Debug + Send + Sync + 'static {
+    /// The least-informative element — "no positive evidence."
+    fn bottom() -> Self;
+    /// Combine two values at a control-flow join point.
+    fn join(self, other: Self) -> Self;
+}
+
+impl LatticeDomain for NullabilityValue {
+    fn bottom() -> Self {
+        NullabilityValue::Unknown
+    }
+    fn join(self, other: Self) -> Self {
+        if self == other { self } else { NullabilityValue::Unknown }
+    }
+}
+
 /// Three-valued nullability lattice (precision-over-soundness).
 ///
 /// Join at merge points: any disagreement → Unknown (we lose certainty rather
