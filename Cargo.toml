@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "crates/wake-schema",
+    "crates/wake-engine",
+    "crates/wake-extract-py",
+    "crates/wake-ir",
+    "crates/wake-prop-null",
+]
+resolver = "2"

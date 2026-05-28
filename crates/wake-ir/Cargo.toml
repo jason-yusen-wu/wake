@@ -1,0 +1,13 @@
+[package]
+name = "wake-ir"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+salsa = "0.26"
+wake-engine = { path = "../wake-engine" }
+wake-schema = { path = "../wake-schema" }
+wake-extract-py = { path = "../wake-extract-py" }
+
+[dev-dependencies]
+salsa = "0.26"
