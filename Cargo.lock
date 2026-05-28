@@ -569,6 +569,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wake-feedback"
+version = "0.1.0"
+dependencies = [
+ "salsa",
+ "wake-diff",
+ "wake-engine",
+ "wake-schema",
+]
+
+[[package]]
 name = "wake-ir"
 version = "0.1.0"
 dependencies = [
