@@ -1,0 +1,27 @@
+# SWE-agent configuration for the ablation arm.
+# Identical to swe_agent_wake.yaml — the WakeHook is attached in task_runner.py
+# with arm="ablation", which suppresses feedback injection while still logging
+# what wake would have said. This gives ablation tracing without affecting
+# the agent's behavior.
+
+agent:
+  model:
+    name: claude-sonnet-4-6
+    per_instance_cost_limit: 3.0
+    total_cost_limit: 0.0
+  max_steps: 30
+
+env:
+  deployment:
+    type: docker
+    image: sweagent/swe-agent:latest
+  repo:
+    type: github
+  install_environment: true
+
+tools:
+  execution_timeout: 120
+  bash_timeout: 60
+  filter_tools: []
+
+save_trajectory: true

@@ -1,0 +1,27 @@
+# SWE-agent configuration for the wake-gated evaluation arm.
+# The WakeHook is attached programmatically in task_runner.py —
+# this file configures everything else.
+
+agent:
+  model:
+    name: claude-sonnet-4-6
+    per_instance_cost_limit: 3.0   # USD; raise for harder instances
+    total_cost_limit: 0.0          # 0 = no global limit
+  max_steps: 30
+
+env:
+  deployment:
+    type: docker
+    image: sweagent/swe-agent:latest
+  repo:
+    type: github               # or "local" for pre-cloned repos
+  install_environment: true
+
+# SWE-agent tool configuration — standard coding tools
+tools:
+  execution_timeout: 120
+  bash_timeout: 60
+  filter_tools: []             # use all available tools
+
+# Output
+save_trajectory: true

@@ -1,0 +1,4 @@
+anthropic>=0.40.0
+swebench>=3.0.0
+datasets>=2.0.0
+tqdm>=4.0.0
