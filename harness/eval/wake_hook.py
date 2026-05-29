@@ -5,17 +5,25 @@ the wake daemon.
 Integration points used:
   on_init          — store agent reference, configure paths
   on_setup_done    — cold-start: register all repo Python files with daemon
-  on_action_executed — detect file changes via `git diff`, run blastRadius,
-                       inject regression feedback into the observation
+                     and take the initial per-file regression snapshot
+  on_action_executed — detect file changes via `git diff`, re-register them,
+                       compare regressions against the per-file snapshot, and
+                       inject feedback into the observation when new regressions
+                       are found
   on_run_done      — stop daemon, save per-task findings log
 
-The gate is mandatory: regression feedback is appended directly to the step
-observation so the agent sees it and must respond before taking another action.
-The model never calls wake directly; it receives natural-language feedback as
-part of its environment output.
+Ordering guarantee (why the snapshot approach is correct):
+  blastRadius(uri, text) diffs the *currently committed* DB state against
+  `text`.  If we call didChange(uri, text) first then blastRadius(uri, text),
+  before==after and the diff is always empty — the gate never fires.  Instead
+  we commit ALL changed files first (required so cross-file callee changes are
+  visible to the workspace summary), then compare analyze_regressions output
+  against a snapshot taken at the end of the previous step.  New regressions
+  that appear since the snapshot are exactly what the current action introduced.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -64,7 +72,7 @@ class TaskLog:
 
 
 # ---------------------------------------------------------------------------
-# Feedback formatting (same helpers as wake_harness.py, inline for portability)
+# Feedback formatting
 # ---------------------------------------------------------------------------
 
 def _byte_to_line(text: str, offset: int) -> int:
@@ -78,7 +86,7 @@ def _format_witness(witness: list[dict]) -> str:
         if k == "none_assignment":
             parts.append(f"None assigned to '{step['symbol']}'")
         elif k == "nullable_param":
-            parts.append(f"param '{step['symbol']}' is Optional (may be None)")
+            parts.append(f"param '{step['symbol']}' is Optional (can be None)")
         elif k == "variable_copy":
             parts.append(f"'{step['from']}' copied to '{step['to']}' (Nullable)")
         elif k == "call_return":
@@ -108,8 +116,13 @@ def _format_regressions(regressions: list[dict], file_contents: dict[str, str]) 
             br = c.get("byte_range", [0, 0])
             sym = c.get("symbol", "?")
             ck = c.get("kind", "?")
-            # Find which file this consumer is in
+            # Use the content of the file containing this consumer's byte range.
+            # Walk registered file contents; fall back to the first available.
             file_text = next(iter(file_contents.values()), "")
+            for uri, text in file_contents.items():
+                if uri.endswith(".py"):
+                    file_text = text
+                    break
             ln = _byte_to_line(file_text, br[0])
             trace = _format_witness(c.get("witness", []))
             lines.append(f"  • line {ln}: '{sym}' used as {ck} — {trace}")
@@ -120,8 +133,44 @@ def _format_regressions(regressions: list[dict], file_contents: dict[str, str]) 
             lines.append(f"  Suggested fix location: line {ln}")
         lines.append("")
 
-    lines.append("Fix these issues before proceeding. Each dereference of a None value will raise an AttributeError, TypeError, or KeyError at runtime.")
+    lines.append(
+        "Fix these issues before proceeding. "
+        "Each dereference of a None value will raise AttributeError, TypeError, or KeyError at runtime."
+    )
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Regression snapshot helpers
+# ---------------------------------------------------------------------------
+
+def _regression_key(r: dict) -> tuple:
+    """Stable identity for a shaped regression finding (root-cause + first consumer)."""
+    rc = r.get("root_cause", {})
+    consumers = r.get("consumers", [])
+    first = consumers[0] if consumers else {}
+    return (
+        rc.get("kind", ""),
+        rc.get("symbol", ""),
+        first.get("symbol", ""),
+        first.get("kind", ""),
+    )
+
+
+def _new_regressions(prev: list[dict], curr: list[dict]) -> list[dict]:
+    """Return regressions that appear in curr but not in prev."""
+    prev_keys = {_regression_key(r) for r in prev}
+    return [r for r in curr if _regression_key(r) not in prev_keys]
+
+
+def _fixed_regressions(prev: list[dict], curr: list[dict]) -> list[dict]:
+    """Return regressions that were in prev but are gone from curr."""
+    curr_keys = {_regression_key(r) for r in curr}
+    return [r for r in prev if _regression_key(r) not in curr_keys]
+
+
+def _content_hash(text: str) -> str:
+    return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +184,7 @@ class WakeHook(AbstractAgentHook):
     Constructor args:
       daemon_path: path to the wake-daemon binary
       output_dir:  directory to write per-task JSON logs
-      arm:         "wake" (full feedback) or "ablation" (hook active but no feedback injected)
+      arm:         "wake" (full feedback) or "ablation" (hook active, no feedback injected)
       instance_id: SWE-bench instance ID, for logging
     """
 
@@ -156,8 +205,14 @@ class WakeHook(AbstractAgentHook):
         self._daemon_proc: subprocess.Popen | None = None
         self._log = TaskLog(instance_id=instance_id, arm=arm)
         self._step_index = 0
-        self._last_diff_set: set[str] = set()
-        self._registered_uris: set[str] = set()
+
+        # Per-file state across steps.
+        # uri → content hash of the last version we registered & snapshotted
+        self._registered_hashes: dict[str, str] = {}
+        # uri → shaped regressions at the END of the previous step (or setup)
+        self._reg_snapshots: dict[str, list[dict]] = {}
+        # Cached repo directory (detected in on_setup_done)
+        self._repo_dir: str = ""
 
     # ── SWE-agent hook callbacks ──────────────────────────────────────────────
 
@@ -167,11 +222,14 @@ class WakeHook(AbstractAgentHook):
     def on_setup_done(self) -> None:
         """
         Called after the SWE-agent environment is set up and the repo is
-        accessible inside Docker. This is the cold-start: walk the repo,
-        register all Python files with the daemon.
+        accessible inside Docker. Cold-start: walk the repo, register all
+        Python files with the daemon, and take the initial regression snapshot.
         """
         t0 = time.perf_counter()
         self._start_daemon()
+
+        # Detect and cache the repo directory once.
+        self._repo_dir = self._detect_repo_dir()
 
         py_files = self._list_repo_python_files()
         for fpath in py_files:
@@ -179,18 +237,31 @@ class WakeHook(AbstractAgentHook):
                 content = self._read_file(fpath)
                 uri = f"file://{fpath}"
                 self._client.did_change(uri, content)
-                self._registered_uris.add(uri)
+                self._registered_hashes[uri] = _content_hash(content)
             except Exception:
                 pass  # unreadable file — skip silently
 
         self._log.cold_start_ms = (time.perf_counter() - t0) * 1000
-        self._log.files_registered = len(self._registered_uris)
+        self._log.files_registered = len(self._registered_hashes)
+
+        # Take the initial per-file regression snapshot (baseline before the agent acts).
+        for uri in list(self._registered_hashes):
+            try:
+                self._reg_snapshots[uri] = self._client.analyze_regressions(uri)
+            except RpcError:
+                self._reg_snapshots[uri] = []
 
     def on_action_executed(self, *, step: Any) -> None:
         """
         Called after each agent action. Detects file edits via git diff,
-        re-registers changed files, runs blastRadius, and injects wake
-        feedback into the observation if regressions are found.
+        re-registers changed files, compares regressions against the per-file
+        snapshot, and injects feedback into the observation if new regressions
+        are found.
+
+        Ordering: ALL changed files are committed via didChange first so that
+        cross-file callee changes are visible to workspace_summaries before we
+        query regressions.  We then diff against the snapshot rather than using
+        blastRadius, which avoids the commit-then-preview self-cancellation bug.
         """
         if self._client is None:
             return
@@ -198,36 +269,54 @@ class WakeHook(AbstractAgentHook):
         self._step_index += 1
         t0 = time.perf_counter()
 
-        # Detect changed Python files since last step using git diff.
-        changed = self._get_changed_py_files()
-        if not changed:
+        # Detect Python files changed since the last step (incremental diff).
+        changed_fpaths = self._get_changed_py_files()
+        if not changed_fpaths:
             return
 
-        # Re-read and re-register each changed file.
-        file_contents: dict[str, str] = {}
-        for fpath in changed:
+        # Read new contents and filter to files that actually changed.
+        new_contents: dict[str, str] = {}  # uri → new text
+        for fpath in changed_fpaths:
             try:
                 content = self._read_file(fpath)
                 uri = f"file://{fpath}"
-                self._client.did_change(uri, content)
-                self._registered_uris.add(uri)
-                file_contents[uri] = content
+                new_hash = _content_hash(content)
+                if self._registered_hashes.get(uri) == new_hash:
+                    continue  # content identical to last registered version — skip
+                new_contents[uri] = content
+                self._registered_hashes[uri] = new_hash
             except Exception:
                 pass
 
-        if not file_contents:
+        if not new_contents:
             return
 
-        # Run blastRadius on each changed file (non-committing preview).
-        all_new: list[dict] = []
-        all_fixed: list[dict] = []
-        for uri, content in file_contents.items():
+        # Commit ALL changed files first (cross-file summaries depend on callee updates).
+        for uri, content in new_contents.items():
             try:
-                blast = self._client.analyze_blast_radius(uri, content)
-                all_new.extend(blast.get("new_regressions", []))
-                all_fixed.extend(blast.get("fixed_regressions", []))
+                self._client.did_change(uri, content)
+                # Ensure any newly-seen file gets a baseline snapshot of [] before
+                # we snapshot it below.
+                if uri not in self._reg_snapshots:
+                    self._reg_snapshots[uri] = []
             except RpcError:
                 pass
+
+        # Now query current regressions and diff against per-file snapshots.
+        all_new: list[dict] = []
+        all_fixed: list[dict] = []
+        for uri in new_contents:
+            try:
+                curr = self._client.analyze_regressions(uri)
+            except RpcError:
+                continue
+            prev = self._reg_snapshots.get(uri, [])
+            new_regs = _new_regressions(prev, curr)
+            fixed_regs = _fixed_regressions(prev, curr)
+            all_new.extend(new_regs)
+            all_fixed.extend(fixed_regs)
+            # Update snapshot so the next step diffs against this state.
+            self._reg_snapshots[uri] = curr
 
         latency_ms = (time.perf_counter() - t0) * 1000
         self._log.total_wake_ms += latency_ms
@@ -235,15 +324,15 @@ class WakeHook(AbstractAgentHook):
         if all_new or all_fixed:
             self._log.findings.append(WakeFinding(
                 step_index=self._step_index,
-                changed_files=list(changed),
+                changed_files=list(new_contents.keys()),
                 new_regressions=all_new,
                 fixed_regressions=all_fixed,
                 latency_ms=latency_ms,
             ))
 
-        # Mandatory gate: inject feedback into observation if regressions found.
+        # Mandatory gate: inject feedback into observation if new regressions found.
         if all_new and self.arm == "wake":
-            feedback = _format_regressions(all_new, file_contents)
+            feedback = _format_regressions(all_new, new_contents)
             self._inject_observation(step, feedback)
 
     def on_run_done(self, *, trajectory: Any, info: Any) -> None:
@@ -273,7 +362,7 @@ class WakeHook(AbstractAgentHook):
     # ── Daemon lifecycle ──────────────────────────────────────────────────────
 
     def _start_daemon(self) -> None:
-        self._daemon_proc = subprocess.Popen(
+        proc = subprocess.Popen(
             [self.daemon_path],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -281,11 +370,8 @@ class WakeHook(AbstractAgentHook):
             text=True,
             bufsize=1,
         )
-        self._client = WakeClient.__new__(WakeClient)
-        self._client._proc = self._daemon_proc
-        self._client._req_id = 0
-        import threading
-        self._client._lock = threading.Lock()
+        self._daemon_proc = proc
+        self._client = WakeClient.from_process(proc)
 
     def _stop_daemon(self) -> None:
         if self._client:
@@ -310,33 +396,55 @@ class WakeHook(AbstractAgentHook):
         except Exception:
             return ""
 
+    def _detect_repo_dir(self) -> str:
+        """
+        Return the absolute path to the repository root inside the container.
+        SWE-agent always clones the repo under /root/<repo_name>.  We use
+        `git rev-parse --show-toplevel` which is unambiguous, falling back to
+        `ls /root` if git is unavailable for some reason.
+        """
+        path = self._communicate("git rev-parse --show-toplevel 2>/dev/null")
+        if path:
+            return path
+        # Fallback: take the first directory under /root that looks like a repo.
+        entries = self._communicate("ls -1 /root 2>/dev/null").splitlines()
+        for entry in entries:
+            candidate = f"/root/{entry.strip()}"
+            if self._communicate(f"test -d {candidate}/.git && echo yes") == "yes":
+                return candidate
+        # Last resort: first entry (original fragile behaviour, but now isolated here).
+        first = entries[0].strip() if entries else ""
+        return f"/root/{first}" if first else "/root"
+
     def _list_repo_python_files(self) -> list[str]:
         """Return absolute paths of all Python files in the repo (inside container)."""
+        repo = self._repo_dir or "/root"
         out = self._communicate(
-            "find /root -name '*.py' -not -path '*/.*' -not -path '*/node_modules/*' "
-            "-not -path '*/__pycache__/*' 2>/dev/null | head -500"
+            f"find {repo} -name '*.py' -not -path '*/.*' -not -path '*/node_modules/*' "
+            f"-not -path '*/__pycache__/*' 2>/dev/null | head -500"
         )
         return [p for p in out.splitlines() if p.endswith(".py")]
 
     def _get_changed_py_files(self) -> list[str]:
         """
-        Return Python files changed since the last git commit (or since the
-        last call). Uses `git diff --name-only HEAD` inside the container.
+        Return Python files changed since the last git commit (HEAD).
+        Uses the cached repo path so we don't re-run ls/git each step.
         """
+        repo = self._repo_dir
+        if not repo:
+            return []
         out = self._communicate(
-            "git -C /root/$(ls /root | head -1) diff --name-only HEAD 2>/dev/null "
-            "| grep '\\.py$'"
+            f"git -C {repo} diff --name-only HEAD 2>/dev/null | grep '\\.py$'"
         )
         if not out:
             return []
-        # Construct absolute paths
-        repo_dir = self._communicate("ls /root | head -1").strip()
-        return [f"/root/{repo_dir}/{p}" for p in out.splitlines() if p]
+        return [f"{repo}/{p}" for p in out.splitlines() if p]
 
     def _read_file(self, fpath: str) -> str:
         """Read a file from inside the Docker container."""
-        out = self._communicate(f"cat {fpath} 2>/dev/null")
-        return out
+        # Quote the path to handle spaces; cat is safe here (no user-controlled interpolation
+        # beyond what the repo already controls).
+        return self._communicate(f"cat '{fpath}' 2>/dev/null")
 
     # ── Observation injection ─────────────────────────────────────────────────
 
@@ -347,12 +455,11 @@ class WakeHook(AbstractAgentHook):
         for frozen dataclasses.
         """
         separator = "\n\n" + "─" * 60 + "\n"
+        new_obs = (getattr(step, "observation", None) or "") + separator + feedback
         try:
-            step.observation = (step.observation or "") + separator + feedback
+            step.observation = new_obs
         except (AttributeError, TypeError):
             try:
-                object.__setattr__(step, "observation",
-                                   (step.observation or "") + separator + feedback)
+                object.__setattr__(step, "observation", new_obs)
             except Exception:
-                # Last resort: log the finding but can't inject
-                pass
+                pass  # can't inject — finding is still logged

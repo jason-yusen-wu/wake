@@ -8,11 +8,18 @@ Metric definitions (design doc §8):
    Positive = wake helps. This is the headline lift number.
 
 2. Regression-catch rate  (operationalizes the 80/20 claim)
-   Numerator:   instances where ablation FAILED a held-out test AND wake
-                fired during the run (wake caught something the tests missed)
-   Denominator: instances where ablation failed any held-out test
-   = "of the bugs the ablation agent introduced that failed held-out tests,
-      what fraction did wake flag during its run?"
+   "Of the bugs the ablation agent introduced that broke previously-passing
+    tests, what fraction did wake flag during the run?"
+
+   Denominator: instances where the ablation arm broke at least one
+                PASS_TO_PASS test (i.e., a test that was already passing is
+                now failing — the agent introduced a regression).
+   Numerator:   among those, instances where wake fired at some point during
+                the run (i.e., the gate would have caught something).
+
+   Note: FAIL_TO_PASS tests are the task targets; failing them means the
+   agent didn't solve the problem, not that it introduced a new regression.
+   PASS_TO_PASS failures are the genuine regressions wake is designed to catch.
 
 3. False-positive rate
    Numerator:   instances where wake fired AND the patch was correct
@@ -46,12 +53,12 @@ class EvalMetrics:
     resolved_rate_ablation: float
     resolved_rate_delta: float
     # Metric 2
-    ablation_failed_held_out: int       # denominator
-    wake_caught_held_out_fail: int      # numerator
+    ablation_introduced_regression: int   # denominator: ablation broke a pass_to_pass test
+    wake_caught_regression: int           # numerator: wake fired on those instances
     regression_catch_rate: float
     # Metric 3
-    wake_correct_patches: int           # denominator
-    wake_fired_on_correct: int          # numerator
+    wake_correct_patches: int             # denominator
+    wake_fired_on_correct: int            # numerator
     false_positive_rate: float
     # Secondary
     avg_cold_start_ms: float
@@ -66,23 +73,22 @@ def compute(results: list[InstanceResult], results_dir: Path | None = None) -> E
     abl_res = sum(1 for r in results if r.ablation.resolved)
 
     # Metric 2: regression-catch rate
-    # ablation failed a held-out test = NOT resolved (any FAIL_TO_PASS test failed)
-    abl_failed_held_out = sum(
+    # An ablation-arm "introduced regression" = at least one PASS_TO_PASS test
+    # that was expected to keep passing now fails.  This is the canonical signal
+    # that the agent broke previously-working behaviour, distinct from simply
+    # failing to solve the task (which is captured by FAIL_TO_PASS).
+    abl_introduced = sum(
         1 for r in results
-        if not r.ablation.resolved and any(
-            not v for v in r.ablation.fail_to_pass_results.values()
-        )
+        if any(not v for v in r.ablation.pass_to_pass_results.values())
     )
     wake_caught = sum(
         1 for r in results
-        if not r.ablation.resolved
-        and any(not v for v in r.ablation.fail_to_pass_results.values())
+        if any(not v for v in r.ablation.pass_to_pass_results.values())
         and r.wake.wake_fired
     )
-    catch_rate = wake_caught / abl_failed_held_out if abl_failed_held_out else float("nan")
+    catch_rate = wake_caught / abl_introduced if abl_introduced else float("nan")
 
     # Metric 3: false-positive rate
-    # Wake correct = wake arm resolved the instance
     wake_correct = sum(1 for r in results if r.wake.resolved)
     wake_fp = sum(1 for r in results if r.wake.resolved and r.wake.wake_fired)
     fp_rate = wake_fp / wake_correct if wake_correct else float("nan")
@@ -112,8 +118,8 @@ def compute(results: list[InstanceResult], results_dir: Path | None = None) -> E
         resolved_rate_wake=wake_res / n if n else 0.0,
         resolved_rate_ablation=abl_res / n if n else 0.0,
         resolved_rate_delta=(wake_res - abl_res) / n if n else 0.0,
-        ablation_failed_held_out=abl_failed_held_out,
-        wake_caught_held_out_fail=wake_caught,
+        ablation_introduced_regression=abl_introduced,
+        wake_caught_regression=wake_caught,
         regression_catch_rate=catch_rate,
         wake_correct_patches=wake_correct,
         wake_fired_on_correct=wake_fp,
@@ -153,14 +159,14 @@ def print_report(m: EvalMetrics) -> None:
     print(f"       Delta:              {m.resolved_rate_delta:+.1%}  {'← headline lift' if m.resolved_rate_delta > 0 else '← no lift'}")
     print()
     print(f"  2. Regression-catch rate  (held-out breaks caught)")
-    print(f"       Ablation failed held-out tests: {m.ablation_failed_held_out} instances")
-    print(f"       Wake fired on those:            {m.wake_caught_held_out_fail}")
-    print(f"       Catch rate:                     {_pct(m.regression_catch_rate)}")
+    print(f"       Ablation broke a pass_to_pass test: {m.ablation_introduced_regression} instances")
+    print(f"       Wake fired on those:                {m.wake_caught_regression}")
+    print(f"       Catch rate:                         {_pct(m.regression_catch_rate)}")
     print()
     print(f"  3. False-positive rate  (trust metric)")
-    print(f"       Correctly-resolved by wake:     {m.wake_correct_patches}")
-    print(f"       Wake fired on those:            {m.wake_fired_on_correct}")
-    print(f"       FP rate:                        {_pct(m.false_positive_rate)}")
+    print(f"       Correctly-resolved by wake:         {m.wake_correct_patches}")
+    print(f"       Wake fired on those:                {m.wake_fired_on_correct}")
+    print(f"       FP rate:                            {_pct(m.false_positive_rate)}")
     print()
     print("  SECONDARY METRICS")
     print(f"  ─────────────────────────────────────────────────────")
@@ -168,11 +174,10 @@ def print_report(m: EvalMetrics) -> None:
     print(f"  Avg warm-query latency:   {m.avg_warm_query_ms:.0f}ms")
     print()
 
-    # Gate verdict
     gate = (
         m.resolved_rate_delta > 0
         and (math.isnan(m.false_positive_rate) or m.false_positive_rate < 0.10)
-        and m.n_errors < m.n_instances * 0.2  # fewer than 20% errored
+        and m.n_errors < m.n_instances * 0.2
     )
     print(f"  PHASE 8 GATE: {'PASS ✓' if gate else 'FAIL ✗'}")
     print("=" * 65)

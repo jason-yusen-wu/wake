@@ -205,6 +205,9 @@ def _evaluate_patch(
     patch_path = output_dir / "patch.diff"
     patch_path.write_text(patch)
 
+    # Try the Python API first; fall back to the stable CLI if unavailable.
+    # Only catch ImportError here — a runtime error inside run_instance_tests
+    # is a real bug and should propagate, not be silently swallowed.
     try:
         from swebench.harness.run_evaluation import run_instance_tests
         results = run_instance_tests(
@@ -219,8 +222,8 @@ def _evaluate_patch(
         ptp_results = {t: results.get(t, False) for t in instance.pass_to_pass}
         resolved = all(ftp_results.values()) and all(ptp_results.values())
         return ftp_results, ptp_results, resolved
-    except Exception as exc:
-        # Fallback: run via swebench CLI
+    except ImportError:
+        # run_instance_tests not available in this swebench version — use CLI.
         return _evaluate_via_cli(instance, str(patch_path), output_dir)
 
 
@@ -355,6 +358,29 @@ def _arm_to_dict(r: ArmResult) -> dict:
         "pass_to_pass": r.pass_to_pass_results,
         "error": r.error,
     }
+
+
+def _load_result(path: Path) -> InstanceResult:
+    """Load a persisted InstanceResult from a result.json file."""
+    d = json.loads(path.read_text())
+
+    def _arm(ad: dict, arm: str) -> ArmResult:
+        return ArmResult(
+            arm=arm,
+            instance_id=d["instance_id"],
+            patch="",
+            resolved=ad.get("resolved", False),
+            fail_to_pass_results=ad.get("fail_to_pass", {}),
+            pass_to_pass_results=ad.get("pass_to_pass", {}),
+            wake_fired=ad.get("wake_fired", False),
+            error=ad.get("error", ""),
+        )
+
+    return InstanceResult(
+        instance_id=d["instance_id"],
+        wake=_arm(d.get("wake", {}), "wake"),
+        ablation=_arm(d.get("ablation", {}), "ablation"),
+    )
 
 
 # ---------------------------------------------------------------------------

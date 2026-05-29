@@ -133,6 +133,41 @@ class WakeHarness:
         self.cfg = cfg
         self.anthropic = anthropic.Anthropic()
 
+    def _build_feedback(
+        self,
+        regs: list[dict],
+        source_text: str,
+        client: "WakeClient",
+        uri: str,
+        preamble: str = (
+            "Your edit introduced the following potential None-dereferences "
+            "(confirmed by static analysis):"
+        ),
+    ) -> str:
+        """Format regression findings into a feedback message for the model."""
+        if self.cfg.ablation:
+            return (
+                "That version has issues. Please try a different approach "
+                "and return the complete file in a ```python ... ``` block."
+            )
+        # Enrich each regression's consumers with def-use provenance.
+        extra_flow: list[str] = []
+        for reg in regs:
+            for consumer in reg.get("consumers", []):
+                br = consumer.get("byte_range", [0, 0])
+                sym = consumer.get("symbol", "")
+                flows = client.query_value_flow(uri, br[0], direction="backward")
+                line = format_value_flow(flows, source_text, sym)
+                if line:
+                    extra_flow.append(line)
+
+        reg_block = format_regressions(regs, source_text)
+        msg = f"{preamble}\n\n{reg_block}"
+        if extra_flow:
+            msg += "\nDef-use provenance:\n" + "\n".join(extra_flow)
+        msg += "\n\nFix these issues and return the complete updated file in a ```python ... ``` block."
+        return msg
+
     def run(
         self,
         files: dict[str, str],   # uri → source text (all workspace files)
@@ -219,16 +254,40 @@ class WakeHarness:
                     })
                     continue
 
-                # --- Verification mode: blastRadius previews the edit ---
+                # --- Verification mode: two-stage gate ---
+                #
+                # Stage 1 — blastRadius: does the edit *introduce* new regressions?
+                # blastRadius diffs the currently-committed state against new_text
+                # WITHOUT committing, so "before" = original buggy file.
                 t0 = time.perf_counter()
                 blast = client.analyze_blast_radius(primary_uri, new_text)
                 latencies.append((time.perf_counter() - t0) * 1000)
 
                 new_regs = blast.get("new_regressions", [])
 
-                if not new_regs:
-                    # Clean edit — commit and succeed.
-                    client.did_change(primary_uri, new_text)
+                if new_regs:
+                    # Edit introduced regressions — build feedback and loop.
+                    regressions_caught = new_regs
+                    feedback = self._build_feedback(
+                        new_regs, new_text, client, primary_uri
+                    )
+                    messages.append({"role": "assistant", "content": assistant_text})
+                    messages.append({"role": "user", "content": feedback})
+                    continue
+
+                # Stage 2 — commit the proposed edit and check what remains.
+                # The edit doesn't introduce new bugs; now check whether it
+                # actually *fixed* the original ones. Without this check the
+                # loop could declare success on a no-op edit that neither
+                # introduces nor fixes anything.
+                client.did_change(primary_uri, new_text)
+
+                t0 = time.perf_counter()
+                remaining_regs = client.analyze_regressions(primary_uri)
+                latencies.append((time.perf_counter() - t0) * 1000)
+
+                if not remaining_regs:
+                    # All issues resolved — true success.
                     return LoopResult(
                         success=True,
                         iterations=iteration + 1,
@@ -237,46 +296,21 @@ class WakeHarness:
                         latency_ms=latencies,
                     )
 
-                # Edit introduced regressions — build feedback.
-                regressions_caught = new_regs
-
-                if self.cfg.ablation:
-                    # Ablation: no wake feedback, just a dumb retry.
-                    feedback = (
-                        "That version has issues. Please try a different approach "
-                        "and return the complete file in a ```python ... ``` block."
-                    )
-                else:
-                    # Enrich each regression with def-use provenance.
-                    extra_flow: list[str] = []
-                    for reg in new_regs:
-                        for consumer in reg.get("consumers", []):
-                            br = consumer.get("byte_range", [0, 0])
-                            sym = consumer.get("symbol", "")
-                            flows = client.query_value_flow(
-                                primary_uri, br[0], direction="backward"
-                            )
-                            line = format_value_flow(flows, new_text, sym)
-                            if line:
-                                extra_flow.append(line)
-
-                    reg_block = format_regressions(new_regs, new_text)
-                    feedback = (
-                        "Your edit introduced the following potential None-dereferences "
-                        "(confirmed by static analysis):\n\n"
-                        f"{reg_block}"
-                    )
-                    if extra_flow:
-                        feedback += "\nDef-use provenance:\n" + "\n".join(extra_flow)
-                    feedback += (
-                        "\n\nFix these issues and return the complete updated file "
-                        "in a ```python ... ``` block."
-                    )
-
+                # Original issues remain — feed them back and continue.
+                regressions_caught = remaining_regs
+                feedback = self._build_feedback(
+                    remaining_regs, new_text, client, primary_uri,
+                    preamble=(
+                        "Your edit doesn't introduce new issues, but the following "
+                        "problems from the original code are still present:"
+                    ),
+                )
                 messages.append({"role": "assistant", "content": assistant_text})
                 messages.append({"role": "user", "content": feedback})
 
-            # Budget exhausted — commit the last attempt anyway for inspection.
+            # Budget exhausted.
+            # new_text may already be committed (if Stage 2 ran on the last
+            # iteration); the daemon is idempotent on re-registration.
             if new_text:
                 client.did_change(primary_uri, new_text)
                 final = new_text

@@ -54,6 +54,22 @@ class WakeClient:
         self._req_id = 0
         self._lock = threading.Lock()
 
+    @classmethod
+    def from_process(cls, proc: subprocess.Popen) -> "WakeClient":
+        """
+        Wrap an already-running daemon process as a WakeClient.
+
+        Use this when the caller manages the daemon lifecycle independently
+        (e.g. WakeHook which needs the process handle for termination).
+        Avoids bypassing __init__ via __new__, so any future fields added to
+        __init__ are automatically present.
+        """
+        client = cls.__new__(cls)
+        client._proc = proc
+        client._req_id = 0
+        client._lock = threading.Lock()
+        return client
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def did_change(self, uri: str, text: str) -> None:

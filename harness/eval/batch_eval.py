@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 from partition import load_dataset, select_instances, InstancePartition
-from task_runner import run_instance, InstanceResult, _arm_to_dict
+from task_runner import run_instance, InstanceResult, _arm_to_dict, _load_result
 
 
 def already_done(instance_id: str, output_dir: Path) -> bool:
@@ -76,28 +76,6 @@ def run_batch(
 
     return results
 
-
-def _load_result(path: Path) -> InstanceResult:
-    from task_runner import InstanceResult, ArmResult
-    d = json.loads(path.read_text())
-
-    def _arm(ad: dict, arm: str) -> ArmResult:
-        return ArmResult(
-            arm=arm,
-            instance_id=d["instance_id"],
-            patch="",
-            resolved=ad.get("resolved", False),
-            fail_to_pass_results=ad.get("fail_to_pass", {}),
-            pass_to_pass_results=ad.get("pass_to_pass", {}),
-            wake_fired=ad.get("wake_fired", False),
-            error=ad.get("error", ""),
-        )
-
-    return InstanceResult(
-        instance_id=d["instance_id"],
-        wake=_arm(d.get("wake", {}), "wake"),
-        ablation=_arm(d.get("ablation", {}), "ablation"),
-    )
 
 
 if __name__ == "__main__":
