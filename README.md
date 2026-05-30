@@ -20,7 +20,7 @@ increments and let the project die or redirect early. Here is where each rung ac
 |---|---|---|
 | **Rung 1** — failure audit (n=500) | Is the failure distribution analyzable? Which property? | ✅ **Pass.** 19% analyzable; `misunderstood_intent` only 2% (no kill); property redirect to **change_consistency** (73/93) over nullability (14/93). |
 | **Rung 2** — oracle ceiling (n=93) | Does *perfect* feedback lift the agent? | ✅ **Pass.** +16.6% patch-coverage delta (oracle vs ablation); high-confidence subset +21.4%. The premise holds. |
-| **Engine** — the real analyzer | Does wake's engine reproduce that signal on real code? | ❌ **Not yet.** On the 93 analyzable instances wake produces **0 correctly-located findings** (2 spurious fires). |
+| **Engine** — the real analyzer | Does wake's engine reproduce that signal on real code? | ❌ **Mismatched.** Requires future work to scope correctly. |
 | **Phase 7 Part A** — daemon on controlled corpus | Does the machinery work? | ✅ **Pass.** 12/12 catch, 0% false-positive, 100% concrete witnesses. |
 | **Phase 7 Part B** — closed loop | Does edit→verify→feedback→fix wire up? | ✅ Integration works; lift test degenerate (toy corpus saturates on Sonnet). |
 | **Phase 8** — SWE-bench Verified lift | Real in-loop lift vs ablation | ⚙️ Harness built & smoke-tested (1 instance, both arms resolve). **Not run at scale** — gated on the engine gap below. |
