@@ -172,15 +172,17 @@ def record_session(audit_path: Path, skip_existing: bool = True) -> None:
             print(_YELLOW + "Feedback template (edit freely):" + _RESET)
             print(_DIM + FEEDBACK_TEMPLATE + _RESET)
 
-            # Multi-line input: user types feedback, ends with a blank line.
-            print(f"  {_BOLD}Enter oracle feedback{_RESET} (blank line to finish):")
+            # Multi-line input: user types feedback, ends with a single blank line.
+            # Implementation: accumulate lines; stop when the user enters a blank
+            # line after having typed at least one non-blank line.
+            print(f"  {_BOLD}Enter oracle feedback{_RESET} (press Enter on a blank line to finish):")
             lines = []
             while True:
                 try:
                     line = input("  ")
                 except EOFError:
                     break
-                if line == "" and lines and lines[-1] == "":
+                if line == "" and any(l.strip() for l in lines):
                     break
                 lines.append(line)
             feedback_text = "\n".join(lines).strip()

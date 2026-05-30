@@ -1,0 +1,11 @@
+{
+  "instance_id": "django__django-15569",
+  "feedback_text": "[MEDIUM] Root cause: `_unregister_lookup()` does not invalidate the lookup cache populated by `get_lookups()`, leaving stale entries after lookup removal.\n  \u2022 line 219: `del cls.class_lookups[lookup_name]` mutates registered lookups without calling `cls._clear_cached_lookups()`, unlike its sibling `register_lookup()` at line 205 which does clear the cache after mutating `class_lookups`.\n  \u2022 Consumers of `cls.get_lookups()` / `cls._meta.get_lookup()` will continue to resolve the unregistered lookup from the cached dict returned by `@functools.lru_cache`-backed `_get_lookup`.\n  Suggested fix location: line 219 in `_unregister_l",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/django/db/models/query_utils.py b/django/db/models/query_utils.py\n--- a/django/db/models/query_utils.py\n+++ b/django/db/models/query_utils.py\n@@ -217,6 +217,7 @@ def _unregister_lookup(cls, lookup, lookup_name=None):\n         if lookup_name is None:\n             lookup_name = lookup.lookup_name\n         del cls.class_lookups[lookup_name]\n+        cls._clear_cached_lookups()\n \n \n def select_related_descend(field, restricted, requested, load_fields, reverse=False):\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:20:36.643348"
+}

@@ -1,0 +1,11 @@
+{
+  "instance_id": "django__django-11179",
+  "feedback_text": "[MEDIUM] Root cause: Fast-delete branch in Collector.delete() omits the PK-reset that the regular delete path performs on collected instances.\n  \u2022 line 280: 'instance.pk' left intact after sql.DeleteQuery.delete_batch() \u2014 unlike the loop at lines 308\u2013313 which calls setattr(obj, model._meta.pk.attname, None) for every deleted instance, this early-return branch skips that update.\n  Suggested fix location: line 280 (set instance's pk attname to None before returning count).",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py\n--- a/django/db/models/deletion.py\n+++ b/django/db/models/deletion.py\n@@ -277,6 +277,7 @@ def delete(self):\n             if self.can_fast_delete(instance):\n                 with transaction.mark_for_rollback_on_error():\n                     count = sql.DeleteQuery(model).delete_batch([instance.pk], self.using)\n+                setattr(instance, model._meta.pk.attname, None)\n                 return count, {model._meta.label: count}\n \n         with transaction.atomic(using=self.using, savepoint=False):\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:20:49.135126"
+}

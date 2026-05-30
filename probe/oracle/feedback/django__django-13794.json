@@ -1,0 +1,11 @@
+{
+  "instance_id": "django__django-13794",
+  "feedback_text": "[MEDIUM] Root cause: lazy proxy class in django/utils/functional.py defines string operator dunders (__mod__, __mul__, __str__) but omits __add__/__radd__, leaving concatenation unsupported.\n  \u2022 django/template/defaultfilters.py add filter: '+' between a str and lazy __proxy__ falls through to str.__add__, raising TypeError and yielding ''.\n  \u2022 any caller doing `\"x\" + gettext_lazy(...)` or vice versa hits the same gap.\n  Suggested fix location: django/utils/functional.py lazy.__proxy__ (~line 176, alongside __mod__) \u2014 add __add__/__radd__ casting self before concatenation.",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/django/utils/functional.py b/django/utils/functional.py\n--- a/django/utils/functional.py\n+++ b/django/utils/functional.py\n@@ -176,6 +176,12 @@ def __mod__(self, rhs):\n                 return str(self) % rhs\n             return self.__cast() % rhs\n \n+        def __add__(self, other):\n+            return self.__cast() + other\n+\n+        def __radd__(self, other):\n+            return other + self.__cast()\n+\n         def __deepcopy__(self, memo):\n             # Instances of this class are effectively immutable. It's just a\n             # collection of functions. So we don't need to do anything\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:20:41.455796"
+}

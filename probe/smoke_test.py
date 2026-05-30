@@ -193,6 +193,25 @@ check("OracleFeedback feedback_text preserved",
 # Summary
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 5. autolabel.py static checks (no API call)
+# ---------------------------------------------------------------------------
+
+import ast as _ast, pathlib as _pathlib
+
+_src = (_pathlib.Path(__file__).parent / "audit" / "autolabel.py").read_text()
+_tree = _ast.parse(_src)
+_fnames = {n.name for n in _ast.walk(_tree) if isinstance(n, _ast.FunctionDef)}
+
+check("autolabel.py parses", True)  # reached here = parsed OK
+check("autolabel _LABEL_SCHEMA present", "_LABEL_SCHEMA" in _src)
+check("autolabel additionalProperties: false", "additionalProperties" in _src)
+check("autolabel uses output_config structured output", "output_config" in _src)
+check("autolabel uses prompt caching (cache_control)", "cache_control" in _src)
+check("autolabel default model is opus-4-7", "claude-opus-4-7" in _src)
+check("autolabel has run_autolabel", "run_autolabel" in _fnames)
+check("autolabel has review_uncertain", "review_uncertain" in _fnames)
+
 print()
 if errors:
     print(f"\033[31m{len(errors)} check(s) failed: {', '.join(errors)}\033[0m")
@@ -202,8 +221,9 @@ else:
     print("\nProbe tooling is ready.")
     print("\nWorkflow:")
     print("  1. python probe/audit/collect.py --source gold --n 100")
-    print("  2. python probe/audit/label.py")
-    print("  3. python probe/audit/analyze.py       ← Rung 1 gate")
-    print("  4. python probe/oracle/record.py       ← write oracle feedback")
-    print("  5. python probe/oracle/harness.py --all")
-    print("  6. python probe/oracle/eval.py         ← Rung 2 ceiling")
+    print("  2a. python probe/audit/autolabel.py        ← Claude labels (ANTHROPIC_API_KEY)")
+    print("  2b. python probe/audit/label.py            ← human review / corrections")
+    print("  3. python probe/audit/analyze.py           ← Rung 1 gate")
+    print("  4. python probe/oracle/record.py           ← write oracle feedback")
+    print("  5. python probe/oracle/harness.py --all    ← ANTHROPIC_API_KEY")
+    print("  6. python probe/oracle/eval.py             ← Rung 2 ceiling")

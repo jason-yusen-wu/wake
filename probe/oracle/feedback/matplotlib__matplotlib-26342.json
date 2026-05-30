@@ -1,0 +1,11 @@
+{
+  "instance_id": "matplotlib__matplotlib-26342",
+  "feedback_text": "[MEDIUM] Root cause: Collection.set_paths still raises NotImplementedError, leaving subclasses without a working implementation\n  \u2022 line 210: 'Collection.set_paths' raises NotImplementedError \u2014 ContourSet (and other Collection subclasses besides PathCollection) inherit this stub, so `cs.set_paths(transformed_paths)` from Cartopy's workaround fails instead of assigning `self._paths`.\n  \u2022 line 1004: 'PathCollection.set_paths' is the only override providing the expected behavior, not propagated to the base class.\n  Suggested fix location: line 210 (make base Collection.set_paths assign self._paths and mark stale, removing the redundant PathCollection override).",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/lib/matplotlib/collections.py b/lib/matplotlib/collections.py\n--- a/lib/matplotlib/collections.py\n+++ b/lib/matplotlib/collections.py\n@@ -207,7 +207,8 @@ def get_paths(self):\n         return self._paths\n \n     def set_paths(self, paths):\n-        raise NotImplementedError\n+        self._paths = paths\n+        self.stale = True\n \n     def get_transforms(self):\n         return self._transforms\n@@ -1001,10 +1002,6 @@ def __init__(self, paths, sizes=None, **kwargs):\n         self.set_sizes(sizes)\n         self.stale = True\n \n-    def set_paths(self, paths):\n-        self._paths = paths\n-        self.stale = True\n-\n     def get_paths(self):\n         return self._paths\n \n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:21:41.030469"
+}

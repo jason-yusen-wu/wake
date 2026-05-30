@@ -1,0 +1,11 @@
+{
+  "instance_id": "astropy__astropy-13453",
+  "feedback_text": "[HIGH] Root cause: HTML writer's `write()` does not propagate user-supplied `formats` to data columns like other ASCII writers do\n  \u2022 line 351: `self.data.header.cols = cols` set, but `self.data.cols` never assigned \u2014 downstream `_set_col_formats()` (inherited from `BaseData`) relies on `self.cols` to apply `self.formats`\n  \u2022 line 355: only `_set_fill_values(cols)` invoked; sibling writers (e.g. `BaseOutputter`/`Basic.write`) additionally call `self.data._set_col_formats()`, so format strings passed via `Table.write(..., formats=...)` are silently ignored for HTML output\n  Suggested fix location: line ~355 in `HTML.write` (assign",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/astropy/io/ascii/html.py b/astropy/io/ascii/html.py\n--- a/astropy/io/ascii/html.py\n+++ b/astropy/io/ascii/html.py\n@@ -349,11 +349,13 @@ def write(self, table):\n         cols = list(table.columns.values())\n \n         self.data.header.cols = cols\n+        self.data.cols = cols\n \n         if isinstance(self.data.fill_values, tuple):\n             self.data.fill_values = [self.data.fill_values]\n \n         self.data._set_fill_values(cols)\n+        self.data._set_col_formats()\n \n         lines = []\n \n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:20:36.949287"
+}

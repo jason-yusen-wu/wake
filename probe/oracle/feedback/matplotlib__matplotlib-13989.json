@@ -1,0 +1,11 @@
+{
+  "instance_id": "matplotlib__matplotlib-13989",
+  "feedback_text": "[HIGH] Root cause: `hist_kwargs` reassigned to a new dict, discarding previously set `range` (and `bins`) keys\n  \u2022 line 6689: `hist_kwargs = dict(density=density)` overwrites the dict populated earlier in `hist()` with `range=bin_range` (set when handling the `range` parameter), so the downstream `np.histogram(..., **hist_kwargs)` call loses the user-supplied range when `density=True` and not stacked.\n  Suggested fix location: line 6689 (update the existing dict instead of rebinding it, e.g. `hist_kwargs['density'] = density`).",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/lib/matplotlib/axes/_axes.py b/lib/matplotlib/axes/_axes.py\n--- a/lib/matplotlib/axes/_axes.py\n+++ b/lib/matplotlib/axes/_axes.py\n@@ -6686,7 +6686,7 @@ def hist(self, x, bins=None, range=None, density=None, weights=None,\n \n         density = bool(density) or bool(normed)\n         if density and not stacked:\n-            hist_kwargs = dict(density=density)\n+            hist_kwargs['density'] = density\n \n         # List to store all the top coordinates of the histograms\n         tops = []\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:20:51.591550"
+}

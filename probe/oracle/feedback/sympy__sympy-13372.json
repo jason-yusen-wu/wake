@@ -1,0 +1,11 @@
+{
+  "instance_id": "sympy__sympy-13372",
+  "feedback_text": "[HIGH] Root cause: in evalf() fallback branch, `reprec`/`imprec` are left unbound when `re`/`im` are non-zero and non-numeric (no else clause raising NotImplementedError).\n  \u2022 line 1309: tuple `r = re, im, reprec, imprec` references `reprec`/`imprec` which may never have been assigned when `re.is_number`/`im.is_number` is False (e.g. Max(0, y)), causing UnboundLocalError instead of falling through to the AttributeError/NotImplementedError handler.\n  Suggested fix location: lines 1299\u20131306 (add else branches raising NotImplementedError when re/im are neither 0 nor numeric so the caller's NotImplementedError handler triggers).",
+  "category": "missing_edge",
+  "which_property": "nullability",
+  "confidence": "high",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/sympy/core/evalf.py b/sympy/core/evalf.py\n--- a/sympy/core/evalf.py\n+++ b/sympy/core/evalf.py\n@@ -1301,12 +1301,16 @@ def evalf(x, prec, options):\n             elif re.is_number:\n                 re = re._to_mpmath(prec, allow_ints=False)._mpf_\n                 reprec = prec\n+            else:\n+                raise NotImplementedError\n             if im == 0:\n                 im = None\n                 imprec = None\n             elif im.is_number:\n                 im = im._to_mpmath(prec, allow_ints=False)._mpf_\n                 imprec = prec\n+            else:\n+                raise NotImplementedError\n             r = re, im, reprec, imprec\n         except AttributeError:\n             raise NotImplementedError\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:20:56.200530"
+}

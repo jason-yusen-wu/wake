@@ -104,16 +104,19 @@ def regressions_match(
 
     caught = 0
     for exp in expected:
-        exp_func = exp.get("func", "")
         exp_sym = exp.get("symbol", "")
         exp_kind = exp.get("kind", "")
+        matched = False
         for r in found:
+            if matched:
+                break
             for c in r.get("consumers", []):
                 if (
                     c.get("symbol", "") == exp_sym
                     and c.get("kind", "") == exp_kind
                 ):
                     caught += 1
+                    matched = True
                     break
     return caught, expected_count
 
@@ -231,6 +234,13 @@ def run(daemon_path: str = "wake-daemon") -> list[CaseResult]:
         print("No spec files found in", SPECS_DIR)
         sys.exit(1)
 
+    # All cases share a single daemon/client.  Each case registers its files but
+    # never un-registers them, so the workspace accumulates across cases.
+    # Cross-case state is benign *only* because no two corpus cases share a
+    # function name — if new cases are added that reuse function names from
+    # existing cases, the ambiguous-name Unknown path will silently suppress
+    # cross-file findings.  Fix: restart the client per case, or ensure unique
+    # function names across the entire corpus.
     results: list[CaseResult] = []
     with WakeClient(daemon_path) as client:
         for spec_path in specs:

@@ -94,27 +94,57 @@ fn extract_null_params(src: &[u8], params: Node<'_>, facts: &mut Vec<NullFact>) 
                 }
             }
             "default_parameter" => {
-                // def f(x=default): x is Unknown (default might or might not be None)
+                // def f(x=default): a `None` default is positive evidence the
+                // param can be None (the default code path supplies None unless
+                // a caller overrides it).  Any other default → Unknown (the
+                // default is non-None but a caller could still pass None; we
+                // decline rather than guess).  This is the NullableParam source
+                // the witness/feedback pipeline is built around.
                 if let Some(name) = child.child_by_field_name("name")
                     && name.kind() == "identifier"
                 {
+                    let default_is_none = child
+                        .child_by_field_name("value")
+                        .map(|v| v.kind() == "none")
+                        .unwrap_or(false);
+                    let annotation = if default_is_none {
+                        NullabilityValue::Nullable
+                    } else {
+                        NullabilityValue::Unknown
+                    };
                     facts.push(NullFact::Param(NullDef {
                         node: node_id(name),
                         symbol: node_text(src, name).to_string(),
-                        annotation: NullabilityValue::Unknown,
+                        annotation,
                         rhs: RhsNullability::Unknown,
                     }));
                 }
             }
             "typed_default_parameter" => {
+                // def f(x: T = default): the param is Nullable if EITHER the
+                // annotation is Optional/None-bearing OR the default is the
+                // `None` literal.  A `None` default with a non-Optional
+                // annotation (e.g. `x: str = None`, a common mistake) is still
+                // genuinely nullable at runtime, so the default evidence wins.
                 let name = child.child_by_field_name("name");
                 let type_node = child.child_by_field_name("type");
                 if let Some(name) = name
                     && name.kind() == "identifier"
                 {
-                    let annotation = type_node
+                    let from_annotation = type_node
                         .map(|t| parse_annotation_text(node_text(src, t)))
                         .unwrap_or(NullabilityValue::Unknown);
+                    let default_is_none = child
+                        .child_by_field_name("value")
+                        .map(|v| v.kind() == "none")
+                        .unwrap_or(false);
+                    let annotation = if default_is_none
+                        || from_annotation == NullabilityValue::Nullable
+                    {
+                        NullabilityValue::Nullable
+                    } else {
+                        from_annotation
+                    };
                     facts.push(NullFact::Param(NullDef {
                         node: node_id(name),
                         symbol: node_text(src, name).to_string(),

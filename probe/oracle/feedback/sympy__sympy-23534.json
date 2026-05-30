@@ -1,0 +1,11 @@
+{
+  "instance_id": "sympy__sympy-23534",
+  "feedback_text": "[HIGH] Root cause: recursive `symbols()` call in iterable branch drops the `cls` argument\n  \u2022 line 794: `symbols(name, **args)` invoked without forwarding `cls` \u2014 when `names` is a non-string iterable (e.g. tuple of patterns), each element recurses through this path and `cls` defaults to `Symbol`, ignoring the caller's `cls=Function`.\n  \u2022 The sibling recursive call earlier in the function correctly threads `cls`; only this branch was missed.\n  Suggested fix location: line 794 (forward `cls=cls` to the recursive `symbols` call).",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/sympy/core/symbol.py b/sympy/core/symbol.py\n--- a/sympy/core/symbol.py\n+++ b/sympy/core/symbol.py\n@@ -791,7 +791,7 @@ def literal(s):\n         return tuple(result)\n     else:\n         for name in names:\n-            result.append(symbols(name, **args))\n+            result.append(symbols(name, cls=cls, **args))\n \n         return type(names)(result)\n \n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:21:13.302581"
+}

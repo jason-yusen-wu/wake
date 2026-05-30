@@ -1,0 +1,11 @@
+{
+  "instance_id": "pydata__xarray-7233",
+  "feedback_text": "[MEDIUM] Root cause: `should_be_coords` only includes coords whose names intersect `window_dim`, omitting all other non-dimensional coordinates of `self.obj`.\n  \u2022 line 976: 'should_be_coords' computed as `set(window_dim) & set(self.obj.coords)` \u2014 drops non-dimensional coords not appearing in window_dim mapping.\n  \u2022 line 977: 'reshaped.set_coords(should_be_coords)' \u2014 resulting Dataset/DataArray demotes those omitted coords to data variables.\n  Suggested fix location: line 976 (union with `set(self.obj.coords)` so all original coords are preserved).",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/xarray/core/rolling.py b/xarray/core/rolling.py\n--- a/xarray/core/rolling.py\n+++ b/xarray/core/rolling.py\n@@ -973,7 +973,10 @@ def construct(\n             else:\n                 reshaped[key] = var\n \n-        should_be_coords = set(window_dim) & set(self.obj.coords)\n+        # should handle window_dim being unindexed\n+        should_be_coords = (set(window_dim) & set(self.obj.coords)) | set(\n+            self.obj.coords\n+        )\n         result = reshaped.set_coords(should_be_coords)\n         if isinstance(self.obj, DataArray):\n             return self.obj._from_temp_dataset(result)\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:21:05.450094"
+}

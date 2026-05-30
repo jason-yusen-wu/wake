@@ -1,0 +1,11 @@
+{
+  "instance_id": "django__django-15499",
+  "feedback_text": "[MEDIUM] Root cause: CreateModel.reduce() handles AlterModelOptions but is missing the parallel branch for AlterModelManagers, leaving an optimization gap.\n  \u2022 line 170: 'reduce' in django/db/migrations/operations/models.py \u2014 the elif chain covers AlterModelOptions, AlterTogetherOptionOperation, AlterOrderWithRespectTo, etc., but never matches AlterModelManagers, so CreateModel + AlterModelManagers is not collapsed.\n  Suggested fix location: line 170 (add an `isinstance(operation, AlterModelManagers)` branch returning CreateModel with operation.managers, mirroring the AlterModelOptions case).",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/django/db/migrations/operations/models.py b/django/db/migrations/operations/models.py\n--- a/django/db/migrations/operations/models.py\n+++ b/django/db/migrations/operations/models.py\n@@ -170,6 +170,19 @@ def reduce(self, operation, app_label):\n                     managers=self.managers,\n                 ),\n             ]\n+        elif (\n+            isinstance(operation, AlterModelManagers)\n+            and self.name_lower == operation.name_lower\n+        ):\n+            return [\n+                CreateModel(\n+                    self.name,\n+                    fields=self.fields,\n+                    options=self.options,\n+                    bases=self.bases,\n+                    managers=operation.managers,\n+                ),\n+            ]\n         elif (\n             isinstance(operation, AlterTogetherOptionOperation)\n             and self.name_lower == operation.name_lower\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:21:48.904364"
+}

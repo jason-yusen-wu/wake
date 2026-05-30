@@ -69,6 +69,12 @@ class TaskLog:
     cold_start_ms: float = 0.0
     total_wake_ms: float = 0.0
     files_registered: int = 0
+    # Status tracking — distinguishes "wake silent because no bug found"
+    # from "WakeHook crashed before it could analyze anything".
+    setup_complete: bool = False        # True after on_setup_done succeeds
+    cold_start_error: str = ""          # populated on any setup failure
+    rpc_errors: int = 0                 # count of failed daemon RPCs at runtime
+    last_rpc_error: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -98,9 +104,27 @@ def _format_witness(witness: list[dict]) -> str:
     return " → ".join(parts) if parts else "(no trace)"
 
 
+def _resolve_text(file_uri: str | None, file_contents: dict[str, str]) -> str:
+    """Look up text by URI; fall back to any registered file if URI missing."""
+    if file_uri and file_uri in file_contents:
+        return file_contents[file_uri]
+    return next(iter(file_contents.values()), "")
+
+
 def _format_regressions(regressions: list[dict], file_contents: dict[str, str]) -> str:
+    """
+    Each regression is expected to carry a ``__file_uri`` key set by the hook
+    when it aggregated cross-file results.  All byte_ranges within that
+    regression (root cause, consumers, fix locus) refer to that single file.
+    Without the tag we fall back to any registered .py text — line numbers
+    may be wrong but the message is still informative.
+    """
     lines = ["WAKE STATIC ANALYSIS — potential None-dereferences introduced by this edit:\n"]
     for r in regressions:
+        home_uri = r.get("__file_uri")
+        home_text = _resolve_text(home_uri, file_contents)
+        home_short = home_uri.rsplit("/", 1)[-1] if home_uri else ""
+
         conf = r.get("confidence", "?").upper()
         rc = r.get("root_cause", {})
         rc_kind = rc.get("kind", "?")
@@ -110,26 +134,19 @@ def _format_regressions(regressions: list[dict], file_contents: dict[str, str]) 
             src = f"param '{rc['symbol']}' is Optional (can be None)"
         else:
             src = rc.get("description", "unknown")
-        lines.append(f"[{conf}] Root cause: {src}")
+        in_file = f" in {home_short}" if home_short else ""
+        lines.append(f"[{conf}] Root cause: {src}{in_file}")
 
         for c in r.get("consumers", []):
             br = c.get("byte_range", [0, 0])
             sym = c.get("symbol", "?")
             ck = c.get("kind", "?")
-            # Use the content of the file containing this consumer's byte range.
-            # Walk registered file contents; fall back to the first available.
-            file_text = next(iter(file_contents.values()), "")
-            for uri, text in file_contents.items():
-                if uri.endswith(".py"):
-                    file_text = text
-                    break
-            ln = _byte_to_line(file_text, br[0])
+            ln = _byte_to_line(home_text, br[0])
             trace = _format_witness(c.get("witness", []))
             lines.append(f"  • line {ln}: '{sym}' used as {ck} — {trace}")
 
         if fl := r.get("fix_locus"):
-            file_text = next(iter(file_contents.values()), "")
-            ln = _byte_to_line(file_text, fl[0])
+            ln = _byte_to_line(home_text, fl[0])
             lines.append(f"  Suggested fix location: line {ln}")
         lines.append("")
 
@@ -224,32 +241,45 @@ class WakeHook(AbstractAgentHook):
         Called after the SWE-agent environment is set up and the repo is
         accessible inside Docker. Cold-start: walk the repo, register all
         Python files with the daemon, and take the initial regression snapshot.
+
+        All failures here are caught and recorded on self._log.cold_start_error
+        so downstream metrics can distinguish "wake silent (no bug)" from
+        "wake crashed at setup".
         """
         t0 = time.perf_counter()
-        self._start_daemon()
+        try:
+            self._start_daemon()
+            # Detect and cache the repo directory once.
+            self._repo_dir = self._detect_repo_dir()
 
-        # Detect and cache the repo directory once.
-        self._repo_dir = self._detect_repo_dir()
+            py_files = self._list_repo_python_files()
+            for fpath in py_files:
+                try:
+                    content = self._read_file(fpath)
+                    uri = f"file://{fpath}"
+                    self._client.did_change(uri, content)
+                    self._registered_hashes[uri] = _content_hash(content)
+                except Exception:
+                    # Unreadable individual file is fine — skip but keep going.
+                    pass
 
-        py_files = self._list_repo_python_files()
-        for fpath in py_files:
-            try:
-                content = self._read_file(fpath)
-                uri = f"file://{fpath}"
-                self._client.did_change(uri, content)
-                self._registered_hashes[uri] = _content_hash(content)
-            except Exception:
-                pass  # unreadable file — skip silently
+            self._log.cold_start_ms = (time.perf_counter() - t0) * 1000
+            self._log.files_registered = len(self._registered_hashes)
 
-        self._log.cold_start_ms = (time.perf_counter() - t0) * 1000
-        self._log.files_registered = len(self._registered_hashes)
-
-        # Take the initial per-file regression snapshot (baseline before the agent acts).
-        for uri in list(self._registered_hashes):
-            try:
-                self._reg_snapshots[uri] = self._client.analyze_regressions(uri)
-            except RpcError:
-                self._reg_snapshots[uri] = []
+            # Take the initial per-file regression snapshot (baseline).
+            for uri in list(self._registered_hashes):
+                try:
+                    self._reg_snapshots[uri] = self._client.analyze_regressions(uri)
+                except RpcError as exc:
+                    self._reg_snapshots[uri] = []
+                    self._log.rpc_errors += 1
+                    self._log.last_rpc_error = str(exc)[:200]
+            self._log.setup_complete = True
+        except Exception as exc:
+            # Whole cold-start failed — record so we don't silently treat
+            # missing findings as "clean run".
+            self._log.cold_start_error = f"{type(exc).__name__}: {exc}"[:300]
+            self._log.cold_start_ms = (time.perf_counter() - t0) * 1000
 
     def on_action_executed(self, *, step: Any) -> None:
         """
@@ -303,6 +333,8 @@ class WakeHook(AbstractAgentHook):
                 pass
 
         # Now query current regressions and diff against per-file snapshots.
+        # Tag each regression with the URI it came from so multi-file
+        # aggregation doesn't lose track of which file each finding lives in.
         all_new: list[dict] = []
         all_fixed: list[dict] = []
         for uri in new_contents:
@@ -313,6 +345,10 @@ class WakeHook(AbstractAgentHook):
             prev = self._reg_snapshots.get(uri, [])
             new_regs = _new_regressions(prev, curr)
             fixed_regs = _fixed_regressions(prev, curr)
+            for r in new_regs:
+                r["__file_uri"] = uri
+            for r in fixed_regs:
+                r["__file_uri"] = uri
             all_new.extend(new_regs)
             all_fixed.extend(fixed_regs)
             # Update snapshot so the next step diffs against this state.
@@ -344,6 +380,10 @@ class WakeHook(AbstractAgentHook):
             json.dump({
                 "instance_id": self._log.instance_id,
                 "arm": self._log.arm,
+                "setup_complete": self._log.setup_complete,
+                "cold_start_error": self._log.cold_start_error,
+                "rpc_errors": self._log.rpc_errors,
+                "last_rpc_error": self._log.last_rpc_error,
                 "cold_start_ms": self._log.cold_start_ms,
                 "total_wake_ms": self._log.total_wake_ms,
                 "files_registered": self._log.files_registered,
@@ -389,11 +429,26 @@ class WakeHook(AbstractAgentHook):
     # ── Environment helpers ───────────────────────────────────────────────────
 
     def _communicate(self, cmd: str) -> str:
-        """Run a bash command inside the SWE-agent Docker container."""
+        """
+        Run a bash command inside the SWE-agent Docker container.
+
+        v1.1.0 notes:
+          - env lives on agent._env (underscore-prefix), not agent.env
+          - SWEEnv.communicate returns a single str (not a (stdout, rc) tuple)
+        Both differ from the v0.x API the previous WakeHook was written for.
+        Failures bump rpc_errors so downstream metrics can detect them.
+        """
+        env = getattr(self._agent, "_env", None)
+        if env is None:
+            self._log.rpc_errors += 1
+            self._log.last_rpc_error = "agent._env is None (setup not complete?)"
+            return ""
         try:
-            output, _ = self._agent.env.communicate(cmd)
-            return output.strip()
-        except Exception:
+            output = env.communicate(cmd)
+            return output.strip() if isinstance(output, str) else ""
+        except Exception as exc:
+            self._log.rpc_errors += 1
+            self._log.last_rpc_error = f"{type(exc).__name__}: {exc}"[:200]
             return ""
 
     def _detect_repo_dir(self) -> str:
@@ -441,9 +496,22 @@ class WakeHook(AbstractAgentHook):
         return [f"{repo}/{p}" for p in out.splitlines() if p]
 
     def _read_file(self, fpath: str) -> str:
-        """Read a file from inside the Docker container."""
-        # Quote the path to handle spaces; cat is safe here (no user-controlled interpolation
-        # beyond what the repo already controls).
+        """
+        Read a file from inside the Docker container.
+        v1.1.0 exposes SWEEnv.read_file(path) which handles binary detection,
+        encoding, and large files better than `cat`.  Fall back to cat for
+        older builds.
+        """
+        env = getattr(self._agent, "_env", None)
+        if env is not None and hasattr(env, "read_file"):
+            try:
+                return env.read_file(fpath)
+            except Exception as exc:
+                self._log.rpc_errors += 1
+                self._log.last_rpc_error = f"read_file({fpath}): {exc}"[:200]
+                return ""
+        # Quote the path to handle spaces; cat is safe here (no user-controlled
+        # interpolation beyond what the repo already controls).
         return self._communicate(f"cat '{fpath}' 2>/dev/null")
 
     # ── Observation injection ─────────────────────────────────────────────────

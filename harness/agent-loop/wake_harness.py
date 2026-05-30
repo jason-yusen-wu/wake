@@ -235,14 +235,21 @@ class WakeHarness:
             regressions_caught: list[dict] = []
 
             for iteration in range(self.cfg.budget):
-                # Call the model.
+                # Call the model.  Per-call timeout caps any single hung
+                # request; the SDK still does its internal 429/529 retries
+                # underneath.
                 response = self.anthropic.messages.create(
                     model=self.cfg.model,
                     max_tokens=4096,
                     system=system,
                     messages=messages,
+                    timeout=180,
                 )
-                assistant_text = response.content[0].text
+                # Find the first text block — avoid IndexError when an
+                # interleaved thinking block sits at content[0].
+                assistant_text = next(
+                    (b.text for b in response.content if b.type == "text"), ""
+                )
                 new_text = extract_python_block(assistant_text)
 
                 if new_text is None:

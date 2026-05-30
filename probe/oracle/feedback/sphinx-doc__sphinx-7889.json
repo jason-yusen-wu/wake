@@ -1,0 +1,11 @@
+{
+  "instance_id": "sphinx-doc__sphinx-7889",
+  "feedback_text": "[MEDIUM] Root cause: `_MockObject.__getitem__` assumes `key` is `str` and forwards it unchanged to `_make_subclass`, which concatenates it with a `str` display name.\n  \u2022 line 55: `key` passed to `_make_subclass(key, self.__display_name__, ...)` \u2014 when a generic class is subscripted (e.g. `Class[T]`), `key` is a `TypeVar`, causing `TypeError: can only concatenate str (not \"TypeVar\") to str` inside `_make_subclass`.\n  Suggested fix location: line 55 (coerce `key` to `str` and broaden the parameter annotation to `Any`).",
+  "category": "api_misuse",
+  "which_property": "type_safety",
+  "confidence": "low",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/sphinx/ext/autodoc/mock.py b/sphinx/ext/autodoc/mock.py\n--- a/sphinx/ext/autodoc/mock.py\n+++ b/sphinx/ext/autodoc/mock.py\n@@ -52,8 +52,8 @@ def __iter__(self) -> Iterator:\n     def __mro_entries__(self, bases: Tuple) -> Tuple:\n         return (self.__class__,)\n \n-    def __getitem__(self, key: str) -> \"_MockObject\":\n-        return _make_subclass(key, self.__display_name__, self.__class__)()\n+    def __getitem__(self, key: Any) -> \"_MockObject\":\n+        return _make_subclass(str(key), self.__display_name__, self.__class__)()\n \n     def __getattr__(self, key: str) -> \"_MockObject\":\n         return _make_subclass(key, self.__display_name__, self.__class__)()\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:21:46.580301"
+}

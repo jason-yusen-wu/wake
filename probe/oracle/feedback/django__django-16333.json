@@ -1,0 +1,11 @@
+{
+  "instance_id": "django__django-16333",
+  "feedback_text": "[MEDIUM] Root cause: `UserCreationForm.save()` overrides `ModelForm.save()` but omits the `self.save_m2m()` call that the parent contract performs after `user.save()`.\n  \u2022 line 142: `user.save()` invoked under `commit=True` \u2014 control returns `user` without ever flushing deferred M2M data collected by `ModelForm._save_m2m`, so any ManyToManyField on custom User models silently loses its cleaned form data.\n  Suggested fix location: line 143 (invoke `self.save_m2m()` after `user.save()` when `commit` is True and the attribute exists).",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/django/contrib/auth/forms.py b/django/contrib/auth/forms.py\n--- a/django/contrib/auth/forms.py\n+++ b/django/contrib/auth/forms.py\n@@ -141,6 +141,8 @@ def save(self, commit=True):\n         user.set_password(self.cleaned_data[\"password1\"])\n         if commit:\n             user.save()\n+            if hasattr(self, \"save_m2m\"):\n+                self.save_m2m()\n         return user\n \n \n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:21:12.482249"
+}

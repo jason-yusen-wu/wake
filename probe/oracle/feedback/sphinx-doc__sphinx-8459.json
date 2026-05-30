@@ -1,0 +1,11 @@
+{
+  "instance_id": "sphinx-doc__sphinx-8459",
+  "feedback_text": "[MEDIUM] Root cause: `record_typehints` calls `inspect.signature` without forwarding `autodoc_type_aliases`, unlike other call sites updated when the option was introduced.\n  \u2022 line 30 (sphinx/ext/autodoc/typehints.py): `inspect.signature(obj)` invoked without `type_aliases=app.config.autodoc_type_aliases`, so annotations recorded for the \"description\" typehints mode bypass the alias mapping, while `sphinx.util.inspect.signature_from_str` / autodoc's `format_args` paths do honor it.\n  Suggested fix location: line 30 (pass `type_aliases=app.config.autodoc_type_aliases` to `inspect.signature`).",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/sphinx/ext/autodoc/typehints.py b/sphinx/ext/autodoc/typehints.py\n--- a/sphinx/ext/autodoc/typehints.py\n+++ b/sphinx/ext/autodoc/typehints.py\n@@ -27,7 +27,7 @@ def record_typehints(app: Sphinx, objtype: str, name: str, obj: Any,\n         if callable(obj):\n             annotations = app.env.temp_data.setdefault('annotations', {})\n             annotation = annotations.setdefault(name, OrderedDict())\n-            sig = inspect.signature(obj)\n+            sig = inspect.signature(obj, type_aliases=app.config.autodoc_type_aliases)\n             for param in sig.parameters.values():\n                 if param.annotation is not param.empty:\n                     annotation[param.name] = typing.stringify(param.annotation)\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:20:24.558440"
+}

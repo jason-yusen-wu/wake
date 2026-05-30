@@ -1,0 +1,11 @@
+{
+  "instance_id": "django__django-11555",
+  "feedback_text": "[HIGH] Root cause: `Meta.ordering` may contain `OrderBy` expression objects, but `find_ordering_name` recurses on each item assuming it is a string field name.\n  \u2022 line 725: `item` from `opts.ordering` passed to `self.find_ordering_name(item, ...)` \u2014 recursive call forwards it to `get_order_dir(field, ...)` which calls `field.startswith('-')`, failing on `OrderBy` instances.\n  Suggested fix location: line 724 (detect `OrderBy` items in `opts.ordering` and append them directly instead of recursing).",
+  "category": "null_type",
+  "which_property": "type_safety",
+  "confidence": "low",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py\n--- a/django/db/models/sql/compiler.py\n+++ b/django/db/models/sql/compiler.py\n@@ -722,6 +722,9 @@ def find_ordering_name(self, name, opts, alias=None, default_order='ASC',\n \n             results = []\n             for item in opts.ordering:\n+                if isinstance(item, OrderBy):\n+                    results.append((item, False))\n+                    continue\n                 results.extend(self.find_ordering_name(item, opts, alias,\n                                                        order, already_seen))\n             return results\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:21:34.497248"
+}

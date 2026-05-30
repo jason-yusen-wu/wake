@@ -1,0 +1,11 @@
+{
+  "instance_id": "django__django-13012",
+  "feedback_text": "[MEDIUM] Root cause: ExpressionWrapper delegates source expression methods but does not override get_group_by_cols to defer to the wrapped expression.\n  \u2022 line 863-867: 'ExpressionWrapper' defines get_source_expressions/set_source_expressions/as_sql delegating to self.expression, but inherits Expression.get_group_by_cols, which returns [self] instead of self.expression.get_group_by_cols(alias).\n  \u2022 Consumer: SQLCompiler.get_group_by() collects these cols and emits constant Value() expressions (e.g., Value(3)) into the GROUP BY clause, producing invalid SQL on Postgres.\n  Suggested fix location: line 864 (add get_group_by_cols override delegating to self.expression",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py\n--- a/django/db/models/expressions.py\n+++ b/django/db/models/expressions.py\n@@ -863,6 +863,9 @@ def set_source_expressions(self, exprs):\n     def get_source_expressions(self):\n         return [self.expression]\n \n+    def get_group_by_cols(self, alias=None):\n+        return self.expression.get_group_by_cols(alias=alias)\n+\n     def as_sql(self, compiler, connection):\n         return self.expression.as_sql(compiler, connection)\n \n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:20:28.246121"
+}

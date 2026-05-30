@@ -1,0 +1,11 @@
+{
+  "instance_id": "django__django-14580",
+  "feedback_text": "[HIGH] Root cause: TypeSerializer special case for models.Model declares no required imports, so generated migrations referencing \"models.Model\" omit the models import.\n  \u2022 line 276: 'special_cases' entry (models.Model, \"models.Model\", []) \u2014 empty imports list propagates through the loop's `return string, set(imports)` to MigrationWriter, which then writes \"models.Model\" without emitting 'from django.db import models'.\n  Suggested fix location: line 276 (include 'from django.db import models' in the imports list for the models.Model special case).",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/django/db/migrations/serializer.py b/django/db/migrations/serializer.py\n--- a/django/db/migrations/serializer.py\n+++ b/django/db/migrations/serializer.py\n@@ -273,7 +273,7 @@ def _format(self):\n class TypeSerializer(BaseSerializer):\n     def serialize(self):\n         special_cases = [\n-            (models.Model, \"models.Model\", []),\n+            (models.Model, \"models.Model\", ['from django.db import models']),\n             (type(None), 'type(None)', []),\n         ]\n         for case, string, imports in special_cases:\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:21:40.231789"
+}

@@ -1,0 +1,11 @@
+{
+  "instance_id": "django__django-16429",
+  "feedback_text": "[HIGH] Root cause: `pivot` datetime constructed from `d`'s fields without propagating `d.tzinfo`, producing a naive datetime when `d` is tz-aware.\n  \u2022 line 97: `pivot` built via `datetime(d.year, d.month, ..., d.second)` in `timesince()` \u2014 missing `tzinfo=d.tzinfo` argument\n  \u2022 line ~103: `pivot` subtracted from `now` (tz-aware when USE_TZ=True) \u2192 raises \"can't subtract offset-naive and offset-aware datetimes\"\n  Suggested fix location: line 97 (pass `tzinfo=d.tzinfo` to the `datetime(...)` constructor for `pivot`).",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/django/utils/timesince.py b/django/utils/timesince.py\n--- a/django/utils/timesince.py\n+++ b/django/utils/timesince.py\n@@ -97,6 +97,7 @@ def timesince(d, now=None, reversed=False, time_strings=None, depth=2):\n             d.hour,\n             d.minute,\n             d.second,\n+            tzinfo=d.tzinfo,\n         )\n     else:\n         pivot = d\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:21:08.591012"
+}

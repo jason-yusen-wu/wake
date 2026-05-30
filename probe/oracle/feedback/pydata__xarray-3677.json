@@ -1,0 +1,11 @@
+{
+  "instance_id": "pydata__xarray-3677",
+  "feedback_text": "[MEDIUM] Root cause: `Dataset.merge()` was not updated to accept `DataArray` inputs like the top-level `merge()` function does.\n  \u2022 line 3607: `other` passed directly to `dataset_merge_method` \u2014 when `other` is a `DataArray`, downstream merge logic expects a `Dataset`/Mapping and fails, while top-level `merge()` converts via `to_dataset()` first.\n  Suggested fix location: line 3606 (convert `other` to a `Dataset` when it is a `DataArray` before calling `dataset_merge_method`).",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/xarray/core/dataset.py b/xarray/core/dataset.py\n--- a/xarray/core/dataset.py\n+++ b/xarray/core/dataset.py\n@@ -3604,6 +3604,7 @@ def merge(\n             If any variables conflict (see ``compat``).\n         \"\"\"\n         _check_inplace(inplace)\n+        other = other.to_dataset() if isinstance(other, xr.DataArray) else other\n         merge_result = dataset_merge_method(\n             self,\n             other,\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:21:59.194822"
+}

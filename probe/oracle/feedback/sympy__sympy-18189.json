@@ -1,0 +1,11 @@
+{
+  "instance_id": "sympy__sympy-18189",
+  "feedback_text": "[HIGH] Root cause: Recursive call to `diophantine` in the syms-reordering branch does not forward the `permute` flag.\n  \u2022 line 185: `diophantine(eq, param)` invoked without `permute=permute` \u2014 when user supplies `syms` in a different order than canonical `var`, results from the recursive call use the default `permute=False`, dropping sign/order permutations before remapping.\n  Suggested fix location: line 185 (forward `permute=permute` to the recursive `diophantine` call).",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/sympy/solvers/diophantine.py b/sympy/solvers/diophantine.py\n--- a/sympy/solvers/diophantine.py\n+++ b/sympy/solvers/diophantine.py\n@@ -182,7 +182,7 @@ def diophantine(eq, param=symbols(\"t\", integer=True), syms=None,\n             if syms != var:\n                 dict_sym_index = dict(zip(syms, range(len(syms))))\n                 return {tuple([t[dict_sym_index[i]] for i in var])\n-                            for t in diophantine(eq, param)}\n+                            for t in diophantine(eq, param, permute=permute)}\n         n, d = eq.as_numer_denom()\n         if n.is_number:\n             return set()\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:21:40.985003"
+}

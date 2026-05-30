@@ -1,0 +1,11 @@
+{
+  "instance_id": "django__django-14672",
+  "feedback_text": "[MEDIUM] Root cause: `make_hashable` normalization applied to `limit_choices_to` in `ForeignObjectRel.identity` was not propagated to `through_fields` in `ManyToManyRel.identity`.\n  \u2022 line 313: `self.through_fields` included raw in the identity tuple \u2014 when defined as a list (e.g. on proxy model checks), `hash(self.identity)` raises `TypeError: unhashable type: 'list'`.\n  Suggested fix location: line 313 in `django/db/models/fields/reverse_related.py` (`ManyToManyRel.identity` must wrap `self.through_fields` with `make_hashable`, mirroring the parent class treatment of `limit_choices_to`).",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/django/db/models/fields/reverse_related.py b/django/db/models/fields/reverse_related.py\n--- a/django/db/models/fields/reverse_related.py\n+++ b/django/db/models/fields/reverse_related.py\n@@ -310,7 +310,7 @@ def __init__(self, field, to, related_name=None, related_query_name=None,\n     def identity(self):\n         return super().identity + (\n             self.through,\n-            self.through_fields,\n+            make_hashable(self.through_fields),\n             self.db_constraint,\n         )\n \n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:20:19.977295"
+}

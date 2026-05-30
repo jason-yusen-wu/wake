@@ -1,0 +1,11 @@
+{
+  "instance_id": "django__django-11119",
+  "feedback_text": "[MEDIUM] Root cause: Engine.render_to_string() constructs Context without propagating the engine's autoescape attribute, missed when autoescape support was added to Engine.\n  \u2022 line 163: 'Context(context)' instantiated without autoescape kwarg \u2014 Engine.autoescape (set in __init__) is honored elsewhere but ignored here, so engines configured with autoescape=False still produce escaped output.\n  Suggested fix location: line 163 (pass autoescape=self.autoescape to Context constructor).",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/django/template/engine.py b/django/template/engine.py\n--- a/django/template/engine.py\n+++ b/django/template/engine.py\n@@ -160,7 +160,7 @@ def render_to_string(self, template_name, context=None):\n         if isinstance(context, Context):\n             return t.render(context)\n         else:\n-            return t.render(Context(context))\n+            return t.render(Context(context, autoescape=self.autoescape))\n \n     def select_template(self, template_name_list):\n         \"\"\"\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:21:33.781103"
+}

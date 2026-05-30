@@ -1,0 +1,11 @@
+{
+  "instance_id": "matplotlib__matplotlib-23314",
+  "feedback_text": "[MEDIUM] Root cause: Axes3D.draw() override omits the visibility check performed by the 2D Axes base class\n  \u2022 line 389: 'Axes3D.draw' unconditionally renders the axes \u2014 ignores self.get_visible(), so set_visible(False) has no effect on 3D subplots\n  \u2022 consumer: Figure.draw \u2192 Axes3D.draw renders backgrounds, axis, and children regardless of visibility flag\n  Suggested fix location: line 389 (early-return in Axes3D.draw when self.get_visible() is False, matching Axes.draw behavior)",
+  "category": "missing_edge",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/lib/mpl_toolkits/mplot3d/axes3d.py b/lib/mpl_toolkits/mplot3d/axes3d.py\n--- a/lib/mpl_toolkits/mplot3d/axes3d.py\n+++ b/lib/mpl_toolkits/mplot3d/axes3d.py\n@@ -387,6 +387,8 @@ def apply_aspect(self, position=None):\n \n     @martist.allow_rasterization\n     def draw(self, renderer):\n+        if not self.get_visible():\n+            return\n         self._unstale_viewLim()\n \n         # draw the background patch\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:21:15.042368"
+}

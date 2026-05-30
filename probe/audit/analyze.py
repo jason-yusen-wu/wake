@@ -155,59 +155,66 @@ def compute(failures: list[LabeledFailure]) -> AuditResult:
 _W = 65
 
 
-def print_report(r: AuditResult) -> None:
-    print()
-    print("=" * _W)
-    print("RUNG 1 — FAILURE AUDIT REPORT")
-    print("=" * _W)
-    print(f"  Total records:  {r.n_total}   Labeled: {r.n_labeled}")
+def print_report(r: AuditResult, file=None) -> None:
+    """Print the Rung 1 report.  If *file* is given, write to both stdout and file."""
+    def _p(*args, **kwargs):
+        print(*args, **kwargs)
+        if file is not None:
+            kwargs.pop("file", None)
+            print(*args, file=file, **kwargs)
+
+    _p()
+    _p("=" * _W)
+    _p("RUNG 1 — FAILURE AUDIT REPORT")
+    _p("=" * _W)
+    _p(f"  Total records:  {r.n_total}   Labeled: {r.n_labeled}")
     if r.n_total > r.n_labeled:
-        print(f"  Unlabeled:      {r.n_total - r.n_labeled}  (run label.py to continue)")
-    print()
-    print("  CATEGORY BREAKDOWN (labeled failures)")
-    print(f"  {'Category':<24} {'Count':>5}  {'Analyzable':>10}  {'Yes':>4}  {'Partial':>7}  {'No':>4}")
-    print("  " + "─" * 61)
+        _p(f"  Unlabeled:      {r.n_total - r.n_labeled}  (run label.py to continue)")
+    _p()
+    _p("  CATEGORY BREAKDOWN (labeled failures)")
+    _p(f"  {'Category':<24} {'Count':>5}  {'Analyzable':>10}  {'Yes':>4}  {'Partial':>7}  {'No':>4}")
+    _p("  " + "─" * 61)
     for b in r.buckets:
         flag = " ←" if b.category == FailureCategory.MISUNDERSTOOD_INTENT else ""
-        print(
+        _p(
             f"  {b.category.value:<24} {b.count:>5}  "
             f"{b.analyzable:>5} ({b.analyzable_rate:>4.0%})  "
             f"{b.yes:>4}  {b.partial:>7}  {b.no:>4}{flag}"
         )
-    print()
-    print(f"  Analyzable bucket:  {r.analyzable_count}/{r.n_labeled} ({r.analyzable_rate:.0%})")
-    print()
-    print("  PROPERTY VOTES (analyzable failures only)")
+    _p()
+    _p(f"  Analyzable bucket:  {r.analyzable_count}/{r.n_labeled} ({r.analyzable_rate:.0%})")
+    _p()
+    _p("  PROPERTY VOTES (analyzable failures only)")
     for prop, count in sorted(r.property_votes.items(), key=lambda x: -x[1]):
-        marker = " ← recommended" if AnalysisProperty(prop) == r.recommended_property else ""
-        print(f"    {prop:<25} {count}{marker}")
-    print()
-    print(f"  RECOMMENDED PROPERTY:  {r.recommended_property.value}")
-    print()
+        marker = " <- recommended" if AnalysisProperty(prop) == r.recommended_property else ""
+        _p(f"    {prop:<25} {count}{marker}")
+    _p()
+    _p(f"  RECOMMENDED PROPERTY:  {r.recommended_property.value}")
+    _p()
 
     # Signals
-    print("  SIGNALS")
-    print("  " + "─" * 40)
+    _p("  SIGNALS")
+    _p("  " + "─" * 40)
     if r.kill_signal:
-        print(f"  ✗ KILL:      misunderstood_intent = {r.misunderstood_fraction:.0%} (> 40%)")
-        print("               Analysis cannot help with the dominant failure mode.")
-        print("               Re-evaluate the premise before proceeding.")
+        _p(f"  KILL:      misunderstood_intent = {r.misunderstood_fraction:.0%} (> 40%)")
+        _p("               Analysis cannot help with the dominant failure mode.")
+        _p("               Re-evaluate the premise before proceeding.")
     else:
-        print(f"  ✓ No kill:   misunderstood_intent = {r.misunderstood_fraction:.0%} (≤ 40%)")
+        _p(f"  No kill:   misunderstood_intent = {r.misunderstood_fraction:.0%} (<=40%)")
 
     if r.redirect_signal:
-        print(f"  ↪ REDIRECT:  change_consistency ({r.property_votes.get('change_consistency', 0)}) "
-              f"> nullability ({r.property_votes.get('nullability', 0)})")
-        print("               Consider blast-radius / missed-caller detection as the first property.")
-        print("               (wake already computes this; prioritise it in the eval.)")
+        _p(f"  REDIRECT:  change_consistency ({r.property_votes.get('change_consistency', 0)}) "
+           f"> nullability ({r.property_votes.get('nullability', 0)})")
+        _p("               Consider blast-radius / missed-caller detection as the first property.")
+        _p("               (wake already computes this; prioritise it in the eval.)")
     else:
         null_v = r.property_votes.get('nullability', 0)
         cc_v   = r.property_votes.get('change_consistency', 0)
-        print(f"  ✓ No redirect: nullability ({null_v}) ≥ change_consistency ({cc_v})")
+        _p(f"  No redirect: nullability ({null_v}) >= change_consistency ({cc_v})")
 
-    print()
-    print(f"  PHASE 8 SUB-POPULATION for Rung 2 oracle test: {r.analyzable_count} instances")
-    print("=" * _W)
+    _p()
+    _p(f"  PHASE 8 SUB-POPULATION for Rung 2 oracle test: {r.analyzable_count} instances")
+    _p("=" * _W)
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +233,19 @@ def main() -> None:
         return
 
     result = compute(failures)
-    print_report(result)
+
+    report_path = Path(__file__).parent / "reports" / "rung1_report.txt"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(report_path, "w") as rf:
+        print_report(result, file=rf)
+
+    print(f"\nRung 1 report → {report_path}")
+    if result.kill_signal:
+        print("ACTION REQUIRED: kill signal detected. Review the report before proceeding.")
+    elif result.redirect_signal:
+        print("NOTE: redirect signal — change_consistency dominates. See report.")
+    else:
+        print(f"Proceed to Rung 2 with {result.analyzable_count} analyzable instances.")
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random as _random
 import sys
 from pathlib import Path
 
@@ -45,12 +46,21 @@ def collect_gold(
     n: int,
     swebench_path: str = "swebench_verified",
     skip_ids: set[str] | None = None,
+    seed: int = 42,
 ) -> list[LabeledFailure]:
     """
     Load `n` instances from SWE-bench Verified and create unlabeled
     LabeledFailure entries using the gold patch.
+
+    The dataset is shuffled with a fixed seed before sampling so the selected
+    instances are representative of the full repo distribution (~46% django,
+    ~15% sympy, ~9% sphinx, etc.) rather than the alphabetically-biased first N.
     """
     instances = _load_swebench(swebench_path)
+    # Shuffle for representative sampling.  Using a seeded RNG keeps the
+    # selection reproducible: the same seed always selects the same instances.
+    rng = _random.Random(seed)
+    rng.shuffle(instances)
     skip = skip_ids or set()
     collected: list[LabeledFailure] = []
     for inst in instances:
@@ -178,8 +188,12 @@ def main() -> None:
                    help="gold: use SWE-bench gold patches; agent: use batch_eval results")
     p.add_argument("--n", type=int, default=100,
                    help="(gold mode) number of instances to collect")
-    p.add_argument("--dataset", default="princeton-nlp/SWE-bench_Verified",
-                   help="(gold mode) SWE-bench dataset path or HuggingFace name")
+    p.add_argument("--swebench", default="princeton-nlp/SWE-bench_Verified",
+                   dest="dataset",
+                   help="(gold mode) local .jsonl path or HuggingFace dataset name "
+                        "(default: princeton-nlp/SWE-bench_Verified)")
+    p.add_argument("--seed", type=int, default=42,
+                   help="random seed for reproducible instance selection (default: 42)")
     p.add_argument("--results-dir", default="../../harness/eval/results",
                    help="(agent mode) path to batch_eval results directory")
     p.add_argument("--output", default=str(ds.DEFAULT_DATASET),
@@ -195,7 +209,7 @@ def main() -> None:
     print(f"Existing records: {len(existing)}.  Skipping: {len(skip)}.")
 
     if args.source == "gold":
-        new = collect_gold(args.n, swebench_path=args.dataset, skip_ids=skip)
+        new = collect_gold(args.n, swebench_path=args.dataset, skip_ids=skip, seed=args.seed)
     else:
         new = collect_agent(Path(args.results_dir), skip_ids=skip)
 
@@ -206,7 +220,25 @@ def main() -> None:
     all_records = existing + new
     ds.save(all_records, output_path)
     print(f"Collected {len(new)} new records. Total: {len(all_records)}. Saved to {output_path}")
-    print(f"\nNext: python label.py --dataset {output_path}")
+
+    # Write a brief collection summary for review.
+    report_path = Path(__file__).parent / "reports" / "collect_summary.txt"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(report_path, "w") as rpt:
+        rpt.write(f"Collection summary\n{'='*40}\n")
+        rpt.write(f"Source:   {args.source}\n")
+        rpt.write(f"New:      {len(new)}\n")
+        rpt.write(f"Total:    {len(all_records)}\n\n")
+        from collections import Counter
+        repo_counts = Counter(f.repo for f in new if f.repo)
+        rpt.write("Repos:\n")
+        for repo, n in repo_counts.most_common(20):
+            rpt.write(f"  {repo}: {n}\n")
+        rpt.write("\nFirst 20 instance IDs:\n")
+        for f in new[:20]:
+            rpt.write(f"  {f.instance_id}  ({f.patch_source.value})\n")
+    print(f"Collection summary → {report_path}")
+    print(f"\nNext: python autolabel.py  (or  python label.py  for manual labeling)")
 
 
 if __name__ == "__main__":

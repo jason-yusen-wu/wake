@@ -1,0 +1,11 @@
+{
+  "instance_id": "astropy__astropy-14995",
+  "feedback_text": "[HIGH] Root cause: `_arithmetic_mask` checks `operand is None` instead of `operand.mask is None`, so an operand whose `.mask` is None falls through to `handle_mask`.\n  \u2022 line 523: `operand` checked for None \u2014 but at this branch `self.mask is not None` and `operand` is not None; only `operand.mask` can be None here.\n  \u2022 line 526: `operand.mask` passed to `handle_mask(self.mask, operand.mask, **kwds)` \u2014 `np.bitwise_or` receives None and raises TypeError.\n  Suggested fix location: line 523 (test `operand.mask is None` instead of `operand is None`).",
+  "category": "null_type",
+  "which_property": "nullability",
+  "confidence": "high",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/astropy/nddata/mixins/ndarithmetic.py b/astropy/nddata/mixins/ndarithmetic.py\n--- a/astropy/nddata/mixins/ndarithmetic.py\n+++ b/astropy/nddata/mixins/ndarithmetic.py\n@@ -520,10 +520,10 @@ def _arithmetic_mask(self, operation, operand, handle_mask, axis=None, **kwds):\n         elif self.mask is None and operand is not None:\n             # Make a copy so there is no reference in the result.\n             return deepcopy(operand.mask)\n-        elif operand is None:\n+        elif operand.mask is None:\n             return deepcopy(self.mask)\n         else:\n-            # Now lets calculate the resulting mask (operation enforces copy)\n+            # Now let's calculate the resulting mask (operation enforces copy)\n             return handle_mask(self.mask, operand.mask, **kwds)\n \n     def _arithmetic_wcs(self, operation, operand, compare_wcs, **kwds):\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:21:59.030970"
+}

@@ -334,12 +334,29 @@ fn return_none_literal_no_regression() {
     assert_eq!(count_regressions(src), 0);
 }
 
-// ── 20. Default parameters are Unknown: no regression ────────────────────────
+// ── 20. None-default parameter is Nullable: regression ───────────────────────
 
 #[test]
-fn default_parameter_unknown_no_regression() {
+fn none_default_parameter_nullable_regression() {
+    // A `None` default is positive evidence the param can be None: the default
+    // code path supplies None unless a caller overrides.  Dereferencing it
+    // without a guard is the canonical NullableParam regression the witness /
+    // feedback pipeline is built around (design.md §4 sources: "Optional[...]
+    // / None defaults").  This is also the dominant real-world nullability
+    // source on SWE-bench (library + framework code rarely annotates Optional).
     let src = "def f(x=None):\n    return x.attr\n";
-    // default_parameter → Unknown annotation → Unknown at consumer → no regression
+    assert_eq!(count_regressions(src), 1);
+    assert!(has_regression_for(src, "x"));
+}
+
+// ── 20b. Non-None default stays Unknown: no regression (precision gate) ───────
+
+#[test]
+fn nonnull_default_parameter_no_regression() {
+    // A non-None default is not evidence of nullability; we decline rather
+    // than guess that a caller might pass None.  Keeps the false-positive
+    // rate down (precision over soundness).
+    let src = "def f(x=5):\n    return x.bit_length()\n";
     assert_eq!(count_regressions(src), 0);
 }
 

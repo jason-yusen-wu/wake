@@ -1,0 +1,11 @@
+{
+  "instance_id": "django__django-16082",
+  "feedback_text": "[MEDIUM] Root cause: MOD operator omitted from numeric operator set used to infer combined output_field\n  \u2022 line 528-535: `_connector_combinations` numeric block lists ADD, SUB, MUL, DIV but not `Combinable.MOD` \u2014 registered combinations via `_resolve_combined_type` therefore miss MOD pairings (e.g. Decimal % Integer), so `CombinedExpression._resolve_output_field()` cannot resolve the result type.\n  Suggested fix location: line 533 (add `Combinable.MOD` to the numeric operators tuple alongside ADD/SUB/MUL/DIV).",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py\n--- a/django/db/models/expressions.py\n+++ b/django/db/models/expressions.py\n@@ -533,6 +533,7 @@ def __hash__(self):\n             Combinable.SUB,\n             Combinable.MUL,\n             Combinable.DIV,\n+            Combinable.MOD,\n         )\n     },\n     # Bitwise operators.\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:20:28.389839"
+}

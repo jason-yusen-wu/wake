@@ -1,0 +1,11 @@
+{
+  "instance_id": "scikit-learn__scikit-learn-14141",
+  "feedback_text": "[MEDIUM] Root cause: `joblib` became a hard runtime dependency of scikit-learn (>=0.20) but `_get_deps_info()` was not updated to report it.\n  \u2022 line 42\u201353: `deps` list in `sklearn/utils/_show_versions.py::_get_deps_info` omits `\"joblib\"` \u2014 consumed by `get_version(module)` loop and surfaced via `show_versions()`, so bug reports/diagnostics never include the installed joblib version.\n  Suggested fix location: line 50 (append `\"joblib\"` to the `deps` list alongside other hard dependencies).",
+  "category": "incomplete_edit",
+  "which_property": "change_consistency",
+  "confidence": "medium",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/sklearn/utils/_show_versions.py b/sklearn/utils/_show_versions.py\n--- a/sklearn/utils/_show_versions.py\n+++ b/sklearn/utils/_show_versions.py\n@@ -48,6 +48,7 @@ def _get_deps_info():\n         \"Cython\",\n         \"pandas\",\n         \"matplotlib\",\n+        \"joblib\",\n     ]\n \n     def get_version(module):\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:21:54.030239"
+}

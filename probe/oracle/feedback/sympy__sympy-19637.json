@@ -1,0 +1,11 @@
+{
+  "instance_id": "sympy__sympy-19637",
+  "feedback_text": "[HIGH] Root cause: 'kern' is only assigned inside a conditional branch but read unconditionally in kernS()\n  \u2022 line 516: 'kern' used as operand of `in` in `hit = kern in s` \u2014 when the preceding `if` block (which assigns `kern`) is not entered, the local is unbound, raising UnboundLocalError (e.g. kernS(\"(2*x)/(x-1)\")).\n  Suggested fix location: line 516 (ensure `hit` is defined on the else-path and only reference `kern` when assigned).",
+  "category": "missing_edge",
+  "which_property": "other",
+  "confidence": "low",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/sympy/core/sympify.py b/sympy/core/sympify.py\n--- a/sympy/core/sympify.py\n+++ b/sympy/core/sympify.py\n@@ -513,7 +513,9 @@ def kernS(s):\n             while kern in s:\n                 kern += choice(string.ascii_letters + string.digits)\n             s = s.replace(' ', kern)\n-        hit = kern in s\n+            hit = kern in s\n+        else:\n+            hit = False\n \n     for i in range(2):\n         try:\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:20:52.616741"
+}

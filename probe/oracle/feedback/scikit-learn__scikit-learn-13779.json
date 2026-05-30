@@ -1,0 +1,11 @@
+{
+  "instance_id": "scikit-learn__scikit-learn-13779",
+  "feedback_text": "[HIGH] Root cause: `fit` does not skip estimators set to `None` when validating `sample_weight` support\n  \u2022 line 81 (sklearn/ensemble/voting.py): `step` from `self.estimators` may be `None` (VotingClassifier allows dropping estimators via set_params(name=None)) \u2014 passed directly to `has_fit_parameter(step, 'sample_weight')` which calls `signature(step.fit)`, raising AttributeError on None.\n  Suggested fix location: line 80 (skip iteration when `step is None` before calling `has_fit_parameter`).",
+  "category": "null_type",
+  "which_property": "nullability",
+  "confidence": "high",
+  "is_analyzable": true,
+  "gold_patch": "diff --git a/sklearn/ensemble/voting.py b/sklearn/ensemble/voting.py\n--- a/sklearn/ensemble/voting.py\n+++ b/sklearn/ensemble/voting.py\n@@ -78,6 +78,8 @@ def fit(self, X, y, sample_weight=None):\n \n         if sample_weight is not None:\n             for name, step in self.estimators:\n+                if step is None:\n+                    continue\n                 if not has_fit_parameter(step, 'sample_weight'):\n                     raise ValueError('Underlying estimator \\'%s\\' does not'\n                                      ' support sample weights.' % name)\n",
+  "recorded_by": "claude-opus-4-7",
+  "record_timestamp": "2026-05-30T03:21:14.326562"
+}
